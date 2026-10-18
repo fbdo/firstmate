@@ -550,6 +550,15 @@ Hooks were registered through the daemon environment (`JCODE_HOOK_PRE_TOOL`, `JC
 The lock was then exercised from the live jcode session that wrote this record, in a disposable lab home from `bin/fm-lab-home.sh`: `bin/fm-lock.sh` recorded the TUI client pid and the session id, a repeat acquisition reconfirmed it, the id of a different live session on the same daemon was refused as another live owner, an absent id was refused with the jcode-specific reason, and `bin/fm-session-start.sh` rendered the `jcode` supervision block.
 `tests/fm-jcode-harness.test.sh` is the portable regression for the same contracts.
 
+The primary path was then accepted in a real interactive jcode TUI on a private daemon, in a plain clone of the branch, with the hooks passed through the daemon environment as `bin/fm-jcode-setup.sh env` prints them:
+
+| Requirement | Observed in the TUI session's persisted transcript and home |
+| --- | --- |
+| The primary takes the helm unprompted | Given an unrelated first task, the model ran `bin/fm-session-start.sh` on its own because of `AGENTS.md`; the digest showed `lock acquired: harness pid <TUI client pid>` and `primary harness: jcode`, and `state/.lock-session` named that client's session. |
+| Delegation is fenced | `swarm` `status` returned a snapshot; `swarm` `spawn` returned `Tool call blocked by pre_tool hook: [subagent-dispatch] ...`. |
+| Existing seatbelts apply | The same session's own `cd` and watcher-kill commands were blocked with `[persistent-cd]` and `[broad-watcher-kill]`. |
+| A blind turn end is caught | With one task in flight and no watcher, the turn ended; the session received the `TURN WOULD END BLIND` reminder as a system message, armed `bin/fm-watch-arm.sh` as a jcode background task (`watcher: started`), and answered without another reminder. |
+
 ## Watcher continuity
 
 The cross-harness evidence combines the 2026-07-17 live pass with Claude's replacement Stop-owned path revalidated on 2026-09-21, all against isolated project and home state.
