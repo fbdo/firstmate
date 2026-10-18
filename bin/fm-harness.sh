@@ -266,8 +266,11 @@ harness_process_verdict() {  # <pid>
     # jcode is a single native binary whose process name is exactly `jcode` for
     # the TUI client, the `jcode serve` daemon, and an in-process `jcode run`
     # (verified, jcode v0.98.1 on Linux: tool subprocesses are children of the
-    # shared `jcode serve` daemon, whose comm is jcode). Anchored, never *jcode*,
-    # so an unrelated command containing that fragment never matches.
+    # shared `jcode serve` daemon, whose comm is jcode). That holds for a jcode
+    # crewmate or scout too, whose pane only attaches a client to its daemon
+    # session, so a worker's tools detect jcode the same way (verified live).
+    # Anchored, never *jcode*, so an unrelated command containing that fragment
+    # never matches.
     jcode) echo "comm jcode"; return ;;
     node*|python*)
       # Bare interpreter: match the harness name in its script path.

@@ -64,7 +64,7 @@ fm_control_verb_allowed() {  # <verb>
 # section 4's verified-adapter list; an unverified adapter is refused rather
 # than guessed at, exactly as a spawn on it would be.
 fm_control_harnesses() {
-  printf '%s\n' claude codex opencode pi pi-signed grok kimi cursor gemini muse rovo omp agy devin commandcode polytoken
+  printf '%s\n' claude codex opencode pi pi-signed grok kimi cursor gemini muse rovo omp agy devin commandcode polytoken jcode
 }
 
 fm_control_harness_supported() {  # <harness>
@@ -82,8 +82,8 @@ fm_control_harness_supported() {  # <harness>
 # and friends. This is the one place that prefix rule is stated. `pi` and
 # `pi-signed` are exact because a `pi*` prefix would swallow the signed adapter,
 # `omp` is exact because an `omp*` prefix would claim unrelated commands, `agy`
-# is exact for the same reason on an even shorter name, `devin` and
-# `commandcode` are exact as well, and an unrecognized value returns nonzero rather than being guessed into a family.
+# is exact for the same reason on an even shorter name, `devin`, `commandcode`,
+# and `jcode` are exact as well, and an unrecognized value returns nonzero rather than being guessed into a family.
 fm_control_harness_family() {  # <recorded-harness>
   case "${1-}" in
     pi) printf 'pi' ;;
@@ -93,6 +93,7 @@ fm_control_harness_family() {  # <recorded-harness>
     devin) printf 'devin' ;;
     commandcode) printf 'commandcode' ;;
     polytoken) printf 'polytoken' ;;
+    jcode) printf 'jcode' ;;
     claude*) printf 'claude' ;;
     codex*) printf 'codex' ;;
     opencode*) printf 'opencode' ;;
@@ -108,7 +109,9 @@ fm_control_harness_family() {  # <recorded-harness>
 
 # Which task kinds an adapter is verified to run. muse, gemini, rovo, agy, devin,
 # commandcode, and polytoken are crewmate/scout adapters only: none has a primary
-# supervision protocol, and bin/fm-spawn.sh refuses a --secondmate launch on any of them. The control
+# supervision protocol, and bin/fm-spawn.sh refuses a --secondmate launch on any of them.
+# jcode does run a primary, but only its crewmate/scout worker lifecycle is
+# verified, so a jcode secondmate is refused the same way. The control
 # plane asks this BEFORE it stops anything, so an incompatible relaunch target is
 # refused while the current agent is still running rather than after it has
 # been stopped.
@@ -116,7 +119,7 @@ fm_control_harness_supports_kind() {  # <harness> <kind>
   local harness=${1-} kind=${2-}
   fm_control_harness_supported "$harness" || return 1
   case "$harness" in
-    muse|gemini|rovo|agy|devin|commandcode|polytoken) [ "$kind" != secondmate ] || return 1 ;;
+    muse|gemini|rovo|agy|devin|commandcode|polytoken|jcode) [ "$kind" != secondmate ] || return 1 ;;
   esac
   return 0
 }
@@ -129,10 +132,15 @@ fm_control_harness_supports_kind() {  # <harness> <kind>
 # does nothing in Prompt scope, and Escape Escape opens the rewind picker),
 # so an interrupt MUST be POST /turn/cancel on the session daemon, and the
 # keyplane tables below deliberately refuse it so nothing can improvise a
-# key. Every other verified harness interrupts through the keyplane.
+# key. jcode is the one `api` adapter: its worker is a daemon session whose
+# pane is only an attached view, so the interrupt is the harness API's cancel
+# (bin/fm-jcode-api.mjs) and its exit stops that view's client process
+# (bin/fm-jcode-lib.sh owns both); the keyplane tables refuse it too. Every
+# other verified harness interrupts through the keyplane.
 fm_control_interrupt_transport() {  # <harness>
   case "${1-}" in
     polytoken) printf 'rest' ;;
+    jcode) printf 'api' ;;
     claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy|devin|commandcode) printf 'key' ;;
     *) return 1 ;;
   esac
@@ -220,6 +228,8 @@ fm_control_interrupt_hazard_signal() {  # <harness>
     # a hazard surface on its path; the /quit exit opens only the slash palette,
     # where Enter accepts the preselected /quit row (verified live).
     polytoken) ;;
+    # jcode types nothing on any control path (fm_control_interrupt_transport).
+    jcode) ;;
     claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy) ;;
     *) return 1 ;;
   esac
@@ -428,6 +438,10 @@ fm_control_harness_wiring_paths() {  # <harness> <worktree> <state-dir> <id> [ki
     opencode) printf '%s\n' "$wt/.opencode/plugins/fm-busy-state.js" ;;
     pi|pi-signed) printf '%s\n' "$state/$id.pi-ext.ts" ;;
     omp) printf '%s\n' "$state/$id.omp-ext.ts" ;;
+    # jcode's hooks are machine-global, so its only per-task wiring is the
+    # record binding the session to this task and its busy generation; a
+    # retired record leaves the old session's hook events unattributed.
+    jcode) printf '%s\n' "$state/$id.jcode-session" ;;
     grok)
       printf '%s\n' "$wt/.fm-grok-turnend"
       printf '%s\n' "$state/$id.grok-turnend-token"

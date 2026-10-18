@@ -527,8 +527,9 @@ Baton invalidation and the `preCompact` surface remain deferred.
 ### jcode
 
 jcode exposes lifecycle hooks only per machine (`[hooks]` in `~/.jcode/config.toml`, or the `JCODE_HOOK_*` environment of the daemon), never per project, and its `turn_end` hook is an observer that cannot block.
-`bin/fm-jcode-hook.sh` is the single registered command for both events a firstmate home uses, `pre_tool` and `turn_end`.
-Because every jcode session on that daemon runs it, it first scopes itself: it acts only when the session's working directory resolves to the hook script's own checkout and that checkout passes [primary scope](#primary-scope), so crewmate worktrees, other homes, and unrelated repositories are a silent no-op.
+`bin/fm-jcode-hook.sh` is the single registered command for the events a firstmate home uses, `pre_tool` and `turn_end` here, plus `turn_start` for its jcode workers' busy state.
+Because every jcode session on that daemon runs it, it first scopes itself: the guard below acts only when the session's working directory resolves to the hook script's own checkout and that checkout passes [primary scope](#primary-scope), so other homes and unrelated repositories are a silent no-op.
+A session bound to one of this home's jcode crewmates or scouts, in that task's own worktree, gets only its busy events recorded; the script's header owns that scope.
 
 `pre_tool` is a real gate: exit 2 blocks the tool call and its stderr reaches the model.
 The dispatcher runs the existing seatbelts on that boundary - the cd guard and the watcher-arm policy for `bash`, the delegation guard for every other tool, and both for each call wrapped in jcode's `batch` tool.

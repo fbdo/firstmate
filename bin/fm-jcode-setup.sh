@@ -14,8 +14,10 @@
 #   fm-jcode-setup.sh install     add this home's dispatcher to config.toml
 #
 # install edits the user's jcode config only on that explicit verb, after a
-# timestamped backup, and only the two keys it owns: `pre_tool` and `turn_end`
-# inside the [hooks] table. An existing single command becomes a two-element
+# timestamped backup, and only the three keys it owns inside the [hooks] table:
+# `pre_tool` and `turn_end` (the primary's seatbelts and backstop) and
+# `turn_start` (the busy source of this home's jcode crewmates and scouts,
+# which also uses `turn_end`). An existing single command becomes a two-element
 # array with this home's dispatcher appended, so another tool's hook keeps
 # running; an existing entry for this exact dispatcher path is left alone.
 # It refuses (exit 1) when python3 with tomllib is unavailable or when the file
@@ -39,10 +41,12 @@ case "$VERB" in
   print)
     printf '# Add to %s (bin/fm-jcode-setup.sh install does this for you):\n' "$CONFIG_FILE"
     printf '[hooks]\n'
+    printf 'turn_start = %s\n' "$(toml_string "$HOOK")"
     printf 'pre_tool = %s\n' "$(toml_string "$HOOK")"
     printf 'turn_end = %s\n' "$(toml_string "$HOOK")"
     ;;
   env)
+    printf 'export JCODE_HOOK_TURN_START=%q\n' "$HOOK"
     printf 'export JCODE_HOOK_PRE_TOOL=%q\n' "$HOOK"
     printf 'export JCODE_HOOK_TURN_END=%q\n' "$HOOK"
     ;;
@@ -64,7 +68,7 @@ hooks = data.get("hooks", {}) if isinstance(data.get("hooks", {}), dict) else {}
 def registered(key):
     v = hooks.get(key)
     return v == hook or (isinstance(v, list) and hook in v)
-keys = ("pre_tool", "turn_end")
+keys = ("turn_start", "pre_tool", "turn_end")
 if verb == "status":
     missing = [k for k in keys if not registered(k)]
     if missing:

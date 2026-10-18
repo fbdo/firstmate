@@ -871,6 +871,11 @@ It has no primary or secondmate supervision protocol.
 The launch generates a private per-task config directory that mirrors the operator's provider/model configuration and enforces unattended permissions without modifying global configuration.
 The first-start license dialog requires an operator decision and is never accepted automatically.
 
+jcode is verified as a primary and for crewmate and scout launches, on the tmux and Herdr backends only; a secondmate launch is refused because only the worker lifecycle is built.
+A jcode worker needs this home's hook dispatcher registered for `turn_start` and `turn_end` (`bin/fm-jcode-setup.sh install`, checked by `bin/fm-jcode-setup.sh status`), because those hooks are its busy source and the spawn fails without them.
+Its tool commands run under the shared jcode daemon rather than the pane, so the pane-borne commit-trailer strip hook does not reach them and a `forge=external` ship, whose push guard rides the pane, is refused on jcode.
+[Its adapter reference](../.agents/skills/harness-adapters/references/harness/jcode.md) owns the operating contract and [its verification record](verification/jcode.md) owns the live evidence.
+
 ### Verification and primary supervision
 
 New harnesses get verified through a supervised trial task before joining the set.

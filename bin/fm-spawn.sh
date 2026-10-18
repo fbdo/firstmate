@@ -213,7 +213,7 @@
 #   profile consultation. A --secondmate spawn is exempt and resolves the SECONDMATE
 #   harness (config/secondmate-harness -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
-#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|devin|commandcode)
+#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|devin|commandcode|jcode)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
 #   new adapters. For pi and pi-signed, fm-spawn resolves the selected executable
@@ -481,6 +481,11 @@
 #                  writes the versioned `<root>-v1` sibling beside it)
 #     __POLYTOKENFACETS__ the worktree's `.polytoken/facets` dir carrying the
 #                  generated firstmate-worker facet (the project facet layer)
+#     __JCODEBIN__  resolved jcode executable for a jcode launch
+#     __JCODESESSION__ the jcode session this spawn created for the task
+#     __JCODEENV__  the JCODE_HOME/JCODE_RUNTIME_DIR/JCODE_SOCKET assignments
+#                  this spawn ran with (empty when none is set), so the pane's
+#                  client dials the daemon that holds the session
 # Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the worktree.
 # A --secondmate launch arms the same semantic busy contract (bin/fm-busy-lib.sh) in THIS
 # parent home for claude, opencode, pi, pi-signed, and omp, so the parent's active-turn
@@ -560,6 +565,22 @@
 # facts; .agents/skills/harness-adapters/references/harness/polytoken.md owns the
 # knowledge record. polytoken is crewmate/scout only and is refused for
 # --secondmate, like agy and devin.
+# jcode (crewmate/scout only, tmux or herdr) inverts the usual order, because
+# its worker is a daemon session and the pane only a view of it, and its TUI
+# takes no positional prompt. Before launch the spawn creates the session
+# through the harness API in the worktree (bin/fm-jcode-api.mjs create, which
+# applies the model and effort and persists the session) and binds it to the
+# task in state/<id>.jcode-session, the record the machine-global hook
+# dispatcher reads to attribute turn_start (busy) and turn_end (idle) events.
+# The pane then runs `jcode --resume <id>`, and only once that client is proven
+# attached is the brief sent through the API: a turn whose only client
+# disconnects is abandoned, so the short-lived API call must never be the only
+# client of a running brief. The gate passes on the first jcode-hook busy
+# event, so a home without registered jcode hooks (bin/fm-jcode-setup.sh)
+# fails loudly at spawn. The pane's environment never reaches jcode tool
+# subprocesses (they are children of the shared daemon), so a forge=external
+# ship, whose push guard rides that environment, is refused on jcode.
+# bin/fm-jcode-lib.sh owns the verified facts.
 # Unless config/keep-ai-trailers is present, every claude launch carries the
 # attribution-off policy in its per-launch --settings JSON, so a spawned worker
 # never writes a Co-Authored-By trailer, Claude-Session link, or generated-with
@@ -771,6 +792,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-busy-lib.sh"
 # shellcheck source=bin/fm-polytoken-lib.sh
 . "$SCRIPT_DIR/fm-polytoken-lib.sh"
+# shellcheck source=bin/fm-jcode-lib.sh
+. "$SCRIPT_DIR/fm-jcode-lib.sh"
 # shellcheck source=bin/fm-cursor-lib.sh
 . "$SCRIPT_DIR/fm-cursor-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
@@ -2214,7 +2237,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   }
 elif [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-  '' | claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy | devin | commandcode | polytoken)
+  '' | claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy | devin | commandcode | polytoken | jcode)
     ARG3=${POS[1]:-}
     ;;
   *' '*)
@@ -2579,6 +2602,12 @@ launch_template() {
   # NO_COLOR is cleared and COLORTERM pinned so the composer placeholder keeps
   # the truecolor styling the shared composer guard reads.
   commandcode) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u FM_OMP_HARNESS -u ATLASSIAN_AGENT_TYPE -u ROVODEV_CLI -u NO_COLOR COLORTERM=truecolor __COMMANDCODEBIN__ --yolo --trust --skip-onboarding --no-auto-update __MODELFLAG____EFFORTFLAG____COMMANDCODEMOD__-- "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+  # jcode: the pane only attaches a TUI client to the session this spawn
+  # already created through the harness API; the brief follows through the
+  # API once that client is proven attached (header above). --no-update keeps
+  # an auto-update restart out of the worker's pane, and --no-selfdev keeps a
+  # jcode checkout from switching the client into self-development mode.
+  jcode) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u FM_OMP_HARNESS -u ATLASSIAN_AGENT_TYPE -u ROVODEV_CLI __JCODEENV____JCODEBIN__ --resume __JCODESESSION__ --no-update --no-selfdev' ;;
   # Kimi Code rejects a positional prompt, so it launches bare and receives
   # only an absolute brief pointer after the TUI readiness gate below.
   # Its turn-end signal is a globally configured Stop hook plus a guarded
@@ -2707,7 +2736,10 @@ esac
 # docs/supervision-protocols/ carries no Command Code wake protocol (1.74.1).
 # polytoken has none either: only the crewmate/scout lifecycle is verified;
 # docs/supervision-protocols/ carries no polytoken primary wake protocol.
-if [ "$KIND" = secondmate ] && { [ "$HARNESS" = muse ] || [ "$HARNESS" = gemini ] || [ "$HARNESS" = agy ] || [ "$HARNESS" = devin ] || [ "$HARNESS" = commandcode ] || [ "$HARNESS" = polytoken ]; }; then
+# jcode does have a primary protocol, but a secondmate launch on it is not
+# built: its launch shape (an API-created session plus an attached view) is
+# verified for crewmates and scouts only.
+if [ "$KIND" = secondmate ] && { [ "$HARNESS" = muse ] || [ "$HARNESS" = gemini ] || [ "$HARNESS" = agy ] || [ "$HARNESS" = devin ] || [ "$HARNESS" = commandcode ] || [ "$HARNESS" = polytoken ] || [ "$HARNESS" = jcode ]; }; then
   echo "error: $HARNESS is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
   exit 1
 fi
@@ -2726,6 +2758,13 @@ fi
 # there the composer would never read empty and steering would stall.
 if [ "$HARNESS" = commandcode ] && [ "$BACKEND" != tmux ] && [ "$BACKEND" != herdr ]; then
   echo "error: commandcode is verified on the tmux and herdr backends only; backend=$BACKEND cannot prove its composer empty. Select backend tmux or herdr." >&2
+  exit 1
+fi
+
+# jcode's exit stops the pane's client and is proven by the backend's agent
+# state, which only tmux and herdr can classify (bin/fm-control-lib.sh).
+if [ "$HARNESS" = jcode ] && [ "$BACKEND" != tmux ] && [ "$BACKEND" != herdr ]; then
+  echo "error: jcode is supported on the tmux and herdr backends only; backend=$BACKEND cannot prove its client stopped. Select backend tmux or herdr." >&2
   exit 1
 fi
 
@@ -2812,6 +2851,16 @@ polytoken)
     exit 1
   }
   ;;
+jcode)
+  JCODE_BIN=$(fm_jcode_binary) || {
+    echo "error: jcode executable not found on PATH; install jcode or select a different verified harness" >&2
+    exit 1
+  }
+  command -v node >/dev/null 2>&1 || {
+    echo "error: node is required to reach the jcode harness API; install it or select a different verified harness" >&2
+    exit 1
+  }
+  ;;
 esac
 
 # config/secondmate-harness may carry optional model/effort tokens alongside the
@@ -2849,6 +2898,9 @@ if [ "$HARNESS" = omp ]; then
 fi
 if [ "$HARNESS" = agy ]; then
   agy_model_validate "$AGY_BIN" "$MODEL" || exit 1
+fi
+if [ "$HARNESS" = jcode ] && [ -n "$MODEL" ] && [ "$MODEL" != default ]; then
+  fm_jcode_model_listed "$JCODE_BIN" "$MODEL" || exit 1
 fi
 # polytoken's model validation composes firstmate's model and effort axes into
 # the launch model reference (bin/fm-polytoken-lib.sh owns the reasoning): the
@@ -3718,6 +3770,10 @@ if [ "$KIND" = ship ]; then
   if [ "$STANDING_FORGE" = external ]; then
     if [ "$YOLO" = on ]; then
       echo "error: --yolo on is refused for $ID: $PROJ_NAME is registered forge=external, where firstmate can neither observe nor perform the review tool's approval or merge; spawn with --yolo off" >&2
+      exit 1
+    fi
+    if [ "$HARNESS" = jcode ]; then
+      echo "error: $ID cannot launch on jcode: $PROJ_NAME is registered forge=external, whose push guard reaches the worker through its pane environment, and jcode tool commands run under the shared jcode daemon instead; select another harness for this task" >&2
       exit 1
     fi
     fm_external_review_adapter_body "$CONFIG" >/dev/null || exit 1
@@ -4950,6 +5006,46 @@ polytoken_spawn_fail() {  # <detail>
   rovo_endpoint_cleanup
 }
 
+# jcode's launch-then-deliver gate (header above). The pane's client must be
+# proven attached to the session before the brief is sent, because the API
+# call that sends it disconnects at once and a turn whose only client
+# disconnects is abandoned. Readiness is then the first jcode-hook busy event
+# - the verdict the supervisor reads - which also proves this home's hooks are
+# registered on the daemon that hosts the session.
+JCODE_SESSION=
+JCODE_READY_FAILURE=
+jcode_wait_for_ready() {
+  local polls=${FM_JCODE_READY_POLLS:-120} interval=${FM_JCODE_POLL_INTERVAL:-0.5} i=0 record
+  if ! fm_jcode_wait_client "$JCODE_SESSION" "$polls" "$interval" >/dev/null; then
+    JCODE_READY_FAILURE="no jcode client attached to session $JCODE_SESSION in window $T, so the brief was not sent"
+    return 1
+  fi
+  if ! "$FM_ROOT/bin/fm-operational-input.sh" encode launch-brief <"$BRIEF" | fm_jcode_api send "$JCODE_SESSION" >/dev/null; then
+    JCODE_READY_FAILURE="the brief could not be delivered to jcode session $JCODE_SESSION through the harness API"
+    return 1
+  fi
+  while [ "$i" -lt "$polls" ]; do
+    record=$(fm_busy_record_read "$STATE_REAL" "$ID" 2>/dev/null) || record=
+    case "$record" in
+      *" jcode-hook "*) return 0 ;;
+    esac
+    i=$((i + 1))
+    [ "$i" -ge "$polls" ] || sleep "$interval"
+  done
+  JCODE_READY_FAILURE="jcode session $JCODE_SESSION never reported its brief turn through this home's hooks; check that the daemon runs them (bin/fm-jcode-setup.sh status)"
+  return 1
+}
+
+jcode_spawn_fail() {  # <detail>
+  printf '%s\n' "$(status_stamp_line "failed: $1")" >>"$STATE/$ID.status"
+  echo "error: $1; inspect window $T" >&2
+  # Close the endpoint first, so its client cannot start a turn on the session
+  # being retired, then retire the session binding and hide the session.
+  rovo_endpoint_cleanup
+  clear_relaunch_harness_wiring jcode "$WT" "$STATE_REAL" "$ID" || true
+  [ -z "$JCODE_SESSION" ] || fm_jcode_api archive "$JCODE_SESSION" >/dev/null 2>&1 || true
+}
+
 if [ "$RELAUNCH" -eq 1 ] && [ "$BACKEND" = orca ]; then
   [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
 elif [ "$RELAUNCH" -eq 1 ]; then
@@ -5250,7 +5346,7 @@ BUSY_GEN=
     }
     [ "$RELAUNCH" -ne 1 ] || RELAUNCH_REPLACEMENT_BUSY_GEN=$BUSY_GEN
     ;;
-  gemini | devin | commandcode | polytoken)
+  gemini | devin | commandcode | polytoken | jcode)
     if [ "$RAW_LAUNCH" -eq 0 ]; then
       BUSY_GEN=$("$FM_ROOT/bin/fm-busy-event.sh" arm "$STATE_REAL" "$ID") || {
         echo "error: failed to arm the busy-state contract for $ID" >&2
@@ -5698,6 +5794,27 @@ EOF
       exclude_path '.polytoken/facets/firstmate-worker.md'
     fi
     ;;
+  jcode)
+    # The worker session itself (bin/fm-jcode-lib.sh owns the facts): created
+    # in the worktree through the harness API, which applies the model and
+    # effort and persists it, then bound to this task and busy generation for
+    # the hook dispatcher. Nothing is written into the worktree. A relaunch
+    # gets a fresh session in the same worktree. Gated on the canonical
+    # template, because a raw launch command never resumes this session.
+    if [ "$RAW_LAUNCH" -eq 0 ]; then
+      jcode_create_args=(create "$WT" --note "Firstmate worker session for task $ID. The launch brief follows as the next message.")
+      [ -z "$MODEL" ] || [ "$MODEL" = default ] || jcode_create_args+=(--model "$MODEL")
+      [ -z "$EFFORT" ] || [ "$EFFORT" = default ] || jcode_create_args+=(--effort "$EFFORT")
+      JCODE_SESSION=$(fm_jcode_api "${jcode_create_args[@]}") && [ -n "$JCODE_SESSION" ] || {
+        echo "error: could not create the jcode worker session for $ID through the harness API" >&2
+        exit 1
+      }
+      fm_jcode_write_session_record "$STATE_REAL" "$ID" "$JCODE_SESSION" "$BUSY_GEN" "$WT" || {
+        echo "error: could not bind jcode session $JCODE_SESSION to task $ID" >&2
+        exit 1
+      }
+    fi
+    ;;
   esac
 
 # Per-task git hooksPath that strips AI commit trailers at the commit object.
@@ -5798,7 +5915,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo branch tasktmp base_branch upstream_consent forge backup_remote backup_prefix model effort account account_provider busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx polytoken_session polytoken_port polytoken_credential", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo branch tasktmp base_branch upstream_consent forge backup_remote backup_prefix model effort account account_provider busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx polytoken_session polytoken_port polytoken_credential jcode_session jcode_home jcode_runtime_dir jcode_socket", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -5856,6 +5973,12 @@ preserve_relaunch_meta() {
   if [ "$KIND" = secondmate ]; then
     echo "home=$PROJ_ABS"
     echo "projects=$SECONDMATE_PROJECTS"
+  fi
+  # The jcode session and the daemon selection that reaches it are the
+  # endpoint identity every later control call uses (bin/fm-jcode-lib.sh).
+  if [ -n "${JCODE_SESSION:-}" ]; then
+    echo "jcode_session=$JCODE_SESSION"
+    fm_jcode_daemon_meta_lines
   fi
   if [ "$RELAUNCH" -eq 1 ]; then
     preserve_relaunch_meta
@@ -6035,6 +6158,11 @@ polytoken)
   LAUNCH=${LAUNCH//__POLYTOKENSESSIONS__/"$(shell_quote "$(fm_polytoken_sessions_root "$STATE_REAL" "$ID")")"}
   LAUNCH=${LAUNCH//__POLYTOKENFACETS__/"$(shell_quote "$WT/.polytoken/facets")"}
   ;;
+jcode)
+  LAUNCH=${LAUNCH//__JCODEBIN__/"$(shell_quote "$JCODE_BIN")"}
+  LAUNCH=${LAUNCH//__JCODESESSION__/"$(shell_quote "${JCODE_SESSION:-}")"}
+  LAUNCH=${LAUNCH//__JCODEENV__/"$(fm_jcode_daemon_env_words)"}
+  ;;
 esac
 LAUNCH=${LAUNCH//__WORKTREE__/$sq_worktree}
 # A record-backed launch brief is published into the state dir of the pane
@@ -6062,7 +6190,7 @@ case "$LAUNCH" in
   ;;
 esac
 case "$HARNESS" in
-claude | codex | opencode | pi | pi-signed | grok | kimi | gemini | muse | rovo | agy | devin | commandcode)
+claude | codex | opencode | pi | pi-signed | grok | kimi | gemini | muse | rovo | agy | devin | commandcode | jcode)
   LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI $LAUNCH"
   ;;
 esac
@@ -6460,6 +6588,12 @@ if [ "$HARNESS" = polytoken ] && [ "$RAW_LAUNCH" -eq 0 ]; then
   fi
   if ! spawn_record_polytoken_session; then
     polytoken_spawn_fail "polytoken session binding could not be recorded for $ID"
+    exit 1
+  fi
+fi
+if [ "$HARNESS" = jcode ] && [ "$RAW_LAUNCH" -eq 0 ]; then
+  if ! jcode_wait_for_ready; then
+    jcode_spawn_fail "$JCODE_READY_FAILURE"
     exit 1
   fi
 fi

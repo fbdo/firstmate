@@ -12,6 +12,12 @@ Verified on 2026-10-14 with Polytoken 0.9.0 on macOS arm64 using the tmux worker
 [Polytoken verification](polytoken.md) owns the commands, session-model proof, and lifecycle output; its credentialed live guard refreshes the evidence.
 This does not verify a Polytoken primary, secondmate, or native Herdr pane.
 
+## jcode worker lifecycle
+
+Verified on 2026-10-18 with jcode v0.98.1 on Linux arm64 using the Herdr worker path (Herdr 0.9.3).
+[jcode verification](jcode.md) owns the commands, the attached-client and session-persistence proofs, and the lifecycle output; its credentialed live guard, `tests/fm-jcode-signals-live-e2e.test.sh`, refreshes the evidence.
+This does not verify a jcode secondmate or the tmux worker path.
+
 ## Harness detection precedence
 
 Firstmate's own harness comes from two kinds of evidence, and `bin/fm-harness.sh` owns how they combine: an environment marker names its harness, and the nearest harness process in the parent chain proves who owns the process tree.

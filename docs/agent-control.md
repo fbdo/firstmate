@@ -44,6 +44,7 @@ Devin's double Escape also opens its `/revert` picker on an idle agent, where En
 An interrupt whose first press shows no running turn stops there and reports `cancel=not-running`, leaving busy state untouched; a picker a mistimed press opened is closed with one Escape and reported as `revert-picker=dismissed`, and `exit` refuses to type into an open picker.
 Command Code cancels a running turn on one Escape and its own busy mod records the cancelled run idle, while two quick Escapes on an idle agent open its Rewind checkpoint picker, where Enter restores a checkpoint; it therefore gets exactly one press, and the same picker dismissal and `exit` refusal apply.
 [`bin/fm-control-lib.sh`](../bin/fm-control-lib.sh) owns the arm signal, press gap, and picker signal.
+jcode has no keyplane mechanics at all, because its pane holds only a view client of a daemon session: `interrupt` cancels the turn through the harness API and reports `cancel=cancelled` once the daemon reports that turn done, and `exit` cancels any running turn the same way and then signals the client proven attached to the recorded session, typing nothing; [`bin/fm-jcode-lib.sh`](../bin/fm-jcode-lib.sh) owns the verified facts behind both.
 muse's session log records `terminal=cancelled` for the interrupted run, so the control plane reports `cancel=confirmed` only after observing that exact acknowledgement.
 
 An interrupt is not complete until the composer is empty.

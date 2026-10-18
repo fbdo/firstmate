@@ -41,6 +41,9 @@
 #   polytoken-hook   Polytoken pre_user_prompt / pre_model_turn open and stop
 #                    closes; a REST turn cancel emits no stop (verified live),
 #                    so the control plane writes the close itself
+#   jcode-hook       jcode turn_start opens and turn_end closes, written by
+#                    bin/fm-jcode-hook.sh for the session bound to the task;
+#                    a cancelled turn also fires turn_end (verified live)
 #   codex-hook, codex-appserver  reserved: Codex, gated by
 #                    fm_busy_codex_semantic_source
 #   kimi-wire, kimi-hook  reserved: standalone Kimi, gated by fm_busy_kimi_verified
@@ -239,6 +242,7 @@ fm_busy_sources_for_harness() {  # <harness>
     devin) adapter=devin-hook ;;
     commandcode) adapter=commandcode-mod ;;
     polytoken) adapter=polytoken-hook ;;
+    jcode) adapter=jcode-hook ;;
     pi|pi-signed) adapter=pi-ext ;;
     omp) adapter=omp-ext ;;
     kimi*)

@@ -34,7 +34,9 @@
 #              otherwise reports `cancel=not-running` having sent one press.
 #   exit       Stop the agent, preserving its terminal endpoint, worktree, and
 #              every uncommitted change. Interrupts first when the task reads
-#              busy, then submits the harness's exit command. Postcondition:
+#              busy, then submits the harness's exit command; jcode instead
+#              cancels through its harness API and signals the client proven
+#              attached to the recorded session (exit_jcode_client). Postcondition:
 #              the backend's recovery-grade classifier reports the agent gone.
 #              Already-stopped is success (idempotent). An endpoint that reads
 #              `missing` is put through the control plane's per-backend absence
@@ -175,6 +177,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-control-lib.sh"
 # shellcheck source=bin/fm-polytoken-lib.sh
 . "$SCRIPT_DIR/fm-polytoken-lib.sh"
+# shellcheck source=bin/fm-jcode-lib.sh
+. "$SCRIPT_DIR/fm-jcode-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
@@ -533,8 +537,26 @@ interrupt_cancel_claim() {
 # its typed acknowledgement (cancel_requested plus the turn settling) as the
 # claim, and the busy close written here because a cancelled turn emits no
 # stop hook (verified live).
+# The api transport (jcode) cancels through the harness API on the daemon the
+# task record names (bin/fm-jcode-lib.sh); its claim is the client's own:
+# `cancelled` once the turn reported done, `not-running` when it was idle, or
+# `unconfirmed`. The busy close needs no help here: a cancelled jcode turn
+# fires turn_end, which the hook dispatcher records (verified live).
 deliver_interrupt() {
-  local cancel devin_gen='' port cred token
+  local cancel devin_gen='' port cred token session
+  if [ "$(fm_control_interrupt_transport "$HARNESS")" = api ]; then
+    session=$(fm_meta_get "$META" jcode_session)
+    [ -n "$session" ] || die "task $ID records no jcode session (jcode_session is absent from its record), so its turn cannot be cancelled through the harness API; the task was launched raw or its record is incomplete. Reconcile the task or relaunch it"
+    cancel=$(FM_JCODE_CANCEL_WAIT_MS=$(awk -v t="$SETTLE_WAIT" 'BEGIN{printf "%d", t * 1000}') \
+      fm_jcode_with_meta_env "$META" node "$SCRIPT_DIR/fm-jcode-api.mjs" cancel "$session") || {
+      [ "$cancel" = unconfirmed ] \
+        || die "task $ID's jcode session $session could not be cancelled through the harness API; the interrupt status is unknown, so no further control action is safe here"
+    }
+    INTERRUPT_ARMED=yes
+    INTERRUPT_HAZARD=none
+    printf '%s' "$cancel"
+    return 0
+  fi
   if [ "$(fm_control_interrupt_transport "$HARNESS")" = rest ]; then
     port=$(fm_meta_get "$META" polytoken_port)
     cred=$(fm_meta_get "$META" polytoken_credential)
@@ -659,6 +681,30 @@ retire_busy_incarnation() {
   fi
 }
 
+# exit_jcode_client: a jcode pane holds only a view client of the worker's
+# daemon session, so exit is structural rather than typed: any running turn
+# is cancelled through the API first, because a client that leaves mid-turn
+# would abandon it, then the client attached to the recorded session -
+# proven by bin/fm-jcode-lib.sh's fm_jcode_client_pid - receives SIGTERM,
+# which exits it cleanly (verified live). The session stays in the daemon,
+# idle and resumable; the endpoint and worktree are untouched. Prints
+# `stopped`, or `stopped cancel=<claim>` when a turn was running.
+exit_jcode_client() {
+  local session cancel pid state suffix=''
+  session=$(fm_meta_get "$META" jcode_session)
+  [ -n "$session" ] || die "task $ID records no jcode session (jcode_session is absent from its record), so exit cannot identify the client to stop; reconcile the task or stop its pane by hand"
+  cancel=$(deliver_interrupt) || return $?
+  [ "$cancel" = not-running ] || suffix=" cancel=$cancel"
+  pid=$(fm_jcode_client_pid "$session" "$(fm_jcode_meta_home "$META")") \
+    || die "task $ID's endpoint reads alive, but no jcode client attached to session $session could be proven in it; refusing to signal an unattributed process"
+  kill -TERM "$pid" 2>/dev/null \
+    || die "the jcode client $pid of task $ID could not be signalled"
+  state=$(wait_agent_state "$EXIT_WAIT" dead) \
+    || die "exit-delivered $ID cancel=$cancel client-signal=delivered agent-state=$state exit=unconfirmed; the jcode client did not stop within ${EXIT_WAIT}s"
+  retire_busy_incarnation
+  printf 'stopped%s' "$suffix"
+}
+
 # do_exit: stop the running agent, preserving endpoint and worktree. Prints
 # `already-stopped`, `endpoint-gone`, or `stopped`.
 do_exit() {
@@ -707,6 +753,10 @@ do_exit() {
       ;;
     *) die "task $ID's endpoint reads '$state' rather than a positively classified state; refusing to send a lifecycle command into an unattributed endpoint" ;;
   esac
+  if [ "$(fm_control_interrupt_transport "$HARNESS")" = api ]; then
+    exit_jcode_client
+    return
+  fi
   # A busy agent is interrupted first before the exit command is submitted.
   case "$(busy_verdict)" in
     busy*)
@@ -1002,6 +1052,13 @@ resolve_relaunch_profile() {
     fm_control_harness_wiring_paths "$PRIOR_HARNESS" "$WT" "$STATE" "$ID" "$KIND" \
         | grep -qxF "$(fm_polytoken_hooks_file "$WT")" \
       || fm_polytoken_require_hooks_free "$WT" || return 1
+  fi
+  # And jcode's launch requirements (bin/fm-jcode-lib.sh owns them): the
+  # binary, and a model its catalog lists.
+  if [ "$TARGET_HARNESS" = jcode ]; then
+    local jcode_bin
+    jcode_bin=$(fm_jcode_binary) || die "jcode executable not found on PATH; relaunching $ID onto jcode would stop the running agent for a launch that must be refused"
+    [ "$TARGET_MODEL" = default ] || fm_jcode_model_listed "$jcode_bin" "$TARGET_MODEL" || return 1
   fi
   # Likewise config/crew-exclude-tools: a malformed file, or a replacement
   # runtime that cannot hide the listed tools, refuses here, before the old

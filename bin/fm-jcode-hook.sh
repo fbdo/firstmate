@@ -5,16 +5,27 @@
 #
 # jcode hooks are configured per machine ([hooks] in ~/.jcode/config.toml or the
 # JCODE_HOOK_* environment of the daemon), not per project, so this dispatcher
-# fires for every jcode session on the daemon. It therefore scopes itself first:
-# it acts only when the session's working directory (JCODE_HOOK_CWD) resolves to
-# this script's own firstmate checkout, and that checkout is a genuine primary
-# home (fm_primary_scope_matches). Every other session - a crewmate worktree, a
-# secondmate home that registers its own copy, an unrelated repo - is a silent
-# exit 0 that costs one git call. It never executes code from the session's
-# repository; each home registers its own copy of this script.
+# fires for every jcode session on the daemon. It therefore scopes itself first
+# and acts for exactly two kinds of session:
+#   - a jcode crewmate or scout of this home: its session id is bound to a task
+#     by that task's state/<id>.jcode-session record (bin/fm-jcode-lib.sh), and
+#     the session's working directory (JCODE_HOOK_CWD) resolves to the task's
+#     recorded worktree. Only turn_start and turn_end act for it.
+#   - this home's own primary: the working directory resolves to this script's
+#     own firstmate checkout, and that checkout is a genuine primary home
+#     (fm_primary_scope_matches).
+# Every other session - another home's worker, a secondmate home that
+# registers its own copy, an unrelated repo - is a silent exit 0 that costs
+# one git call. It never executes code from the session's repository; each
+# home registers its own copy of this script.
 #
 # Events (JCODE_HOOK_EVENT):
-#   pre_tool   GATE. stdin is the tool input JSON, JCODE_HOOK_TOOL_NAME the tool.
+#   turn_start OBSERVER. For a bound worker, records busy through
+#              bin/fm-busy-event.sh with source jcode-hook and the busy
+#              generation its record carries, so an event from a retired
+#              incarnation is refused as stale. Ignored for the primary.
+#   pre_tool   GATE, primary only. stdin is the tool input JSON,
+#              JCODE_HOOK_TOOL_NAME the tool.
 #              Runs the existing PreToolUse seatbelts against it:
 #                bash   -> bin/fm-cd-pretool-check.sh and bin/fm-arm-pretool-check.sh
 #                swarm  -> bin/fm-subagent-pretool-check.sh --action <action>
@@ -24,7 +35,10 @@
 #              returns to the model as the tool error. jcode treats any other
 #              exit, a timeout, or a missing binary as allow (fail open by
 #              jcode's design), and so does every seatbelt on malformed input.
-#   turn_end   OBSERVER. Runs bin/fm-turnend-guard.sh for this session. On its
+#   turn_end   OBSERVER. For a bound worker, records idle the same way and
+#              touches the task's turn-ended notification; a cancelled turn
+#              fires turn_end too (verified, jcode v0.98.1). For the primary,
+#              runs bin/fm-turnend-guard.sh for this session. On its
 #              exit 2 it submits one hidden system reminder carrying the guard's
 #              banner through bin/fm-jcode-api.mjs, which starts one follow-up
 #              turn. The next turn_end of that same session is consumed without
@@ -46,17 +60,40 @@ SESSION=${JCODE_HOOK_SESSION_ID:-}
 CWD=${JCODE_HOOK_CWD:-${PWD:-}}
 
 case "$EVENT" in
-  pre_tool|turn_end) ;;
+  turn_start|pre_tool|turn_end) ;;
   *) exit 0 ;;
 esac
 
-# --- scope: this home's own primary session only ------------------------------
 [ -n "$CWD" ] || exit 0
 TOPLEVEL=$(git -C "$CWD" rev-parse --show-toplevel 2>/dev/null) || exit 0
 TOPLEVEL=$(CDPATH='' cd -- "$TOPLEVEL" 2>/dev/null && pwd -P) || exit 0
-[ "$TOPLEVEL" = "$FM_ROOT" ] || exit 0
 export FM_HOME=${FM_HOME:-$FM_ROOT}
 STATE=${FM_STATE_OVERRIDE:-$FM_HOME/state}
+
+# --- scope: a jcode worker of this home ---------------------------------------
+if [ "$EVENT" != pre_tool ] && [ -d "$STATE" ]; then
+  # shellcheck source=bin/fm-jcode-lib.sh
+  . "$SCRIPT_DIR/fm-jcode-lib.sh"
+  if BOUND=$(fm_jcode_session_task "$STATE" "$SESSION"); then
+    IFS=$'\t' read -r TASK_ID TASK_GEN TASK_WT <<EOF
+$BOUND
+EOF
+    TASK_WT=$(CDPATH='' cd -- "$TASK_WT" 2>/dev/null && pwd -P) || exit 0
+    [ "$TOPLEVEL" = "$TASK_WT" ] || exit 0
+    if [ "$EVENT" = turn_start ]; then
+      "$SCRIPT_DIR/fm-busy-event.sh" apply "$STATE" "$TASK_ID" busy --gen "$TASK_GEN" \
+        --source jcode-hook --event turn-start >/dev/null 2>&1 || true
+    else
+      "$SCRIPT_DIR/fm-busy-event.sh" apply "$STATE" "$TASK_ID" idle --gen "$TASK_GEN" \
+        --source jcode-hook --event turn-end --turn-ended >/dev/null 2>&1 || true
+    fi
+    exit 0
+  fi
+fi
+[ "$EVENT" != turn_start ] || exit 0
+
+# --- scope: this home's own primary session only ------------------------------
+[ "$TOPLEVEL" = "$FM_ROOT" ] || exit 0
 # shellcheck source=bin/fm-primary-scope-lib.sh
 . "$SCRIPT_DIR/fm-primary-scope-lib.sh"
 fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
