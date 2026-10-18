@@ -26,14 +26,15 @@ unset _FM_SESSION_LOCK_LIB_DIR
 
 # Known harness command names; extend when a new adapter is verified. omp is
 # anchored exactly like pi: its process name is the bare word `omp` (verified,
-# omp 18.1.11), and a substring match would claim ompd or comp.
-FM_HARNESS_RE='claude|codex|opencode|grok|kimi|^pi$|^pi-signed$|^omp$'
+# omp 18.1.11), and a substring match would claim ompd or comp. jcode is
+# anchored the same way (verified, jcode v0.98.1).
+FM_HARNESS_RE='claude|codex|opencode|grok|kimi|^pi$|^pi-signed$|^omp$|^jcode$'
 
 # The same harnesses as exact executable names. Keep in sync with
 # FM_HARNESS_RE. Used only for the stricter path evidence below, where the
 # loose regex would also match ordinary firstmate paths such as
 # bin/fm-claude-stop-autoarm.sh.
-FM_HARNESS_NAMES=(claude codex opencode grok kimi pi-signed pi omp)
+FM_HARNESS_NAMES=(claude codex opencode grok kimi pi-signed pi omp jcode)
 
 # Print the exact harness name carried by executable path $1 - its own basename
 # or any directory component - or return 1.
@@ -208,15 +209,23 @@ fm_harness_pid_alive() {
 
 # Print the Claude session id this process may own with, or return 1. $1 is the
 # ancestry list an earlier walk already produced, so a caller that walked once
-# need not walk again.
+# need not walk again. A jcode session's id is accepted through its own trust
+# gate (fm_session_lock_jcode_session_id below) when no Claude id is trusted.
 fm_session_lock_trusted_session_id() {  # [<ancestry-pids>]
-  local id=${CLAUDE_CODE_SESSION_ID:-} claude_pid=${CLAUDE_PID:-} pids=${1:-} pid comm args
-  [ -n "$id" ] || return 1
-  case "$id" in *$'\n'*|*$'\r'*) return 1 ;; esac
-  case "$claude_pid" in ''|*[!0-9]*) return 1 ;; esac
+  local pids=${1:-}
   if [ -z "$pids" ]; then
     pids=$(fm_harness_ancestry_pids) || return 1
   fi
+  fm_session_lock_claude_session_id "$pids" && return 0
+  fm_session_lock_jcode_session_id "$pids"
+}
+
+# Print the trusted Claude session id for ancestry $1, or return 1 (gate above).
+fm_session_lock_claude_session_id() {  # <ancestry-pids>
+  local id=${CLAUDE_CODE_SESSION_ID:-} claude_pid=${CLAUDE_PID:-} pids=$1 pid comm args
+  [ -n "$id" ] || return 1
+  case "$id" in *$'\n'*|*$'\r'*) return 1 ;; esac
+  case "$claude_pid" in ''|*[!0-9]*) return 1 ;; esac
   while IFS= read -r pid; do
     [ "$pid" = "$claude_pid" ] || continue
     comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
@@ -229,6 +238,104 @@ fm_session_lock_trusted_session_id() {  # [<ancestry-pids>]
 $pids
 EOF
   return 1
+}
+
+# --- jcode session identity -------------------------------------------------
+# jcode runs every session of a machine (or of one JCODE_HOME/socket) inside ONE
+# shared `jcode serve` daemon, and every tool subprocess is that daemon's child
+# (verified, jcode v0.98.1 on Linux). The contiguous harness ancestry of any
+# jcode tool shell is therefore the daemon pid alone, identical for every
+# session it hosts, so ancestry membership cannot tell two jcode sessions apart
+# and the daemon pid must never anchor or prove a session lock.
+#
+# Identity instead comes from two records the daemon itself writes under its
+# JCODE_HOME (default ~/.jcode):
+#   active_pids/<session-id>     the pid of the process that owns the session -
+#                                 the shared daemon in server mode, the run
+#                                 process for an in-process `jcode run`.
+#   client_sessions/<client-pid> the session id a TUI client process is attached
+#                                 to. The file outlives its client, so it counts
+#                                 only while that pid is a live jcode process.
+# Trust gate: JCODE_SESSION_ID (exported into every tool subprocess) is trusted
+# only when active_pids/<id> names the jcode process in this tool's own
+# ancestry, so an id retained in a foreign environment never owns a lock.
+
+# Print the jcode home the daemon above this process uses.
+fm_jcode_home() {
+  printf '%s\n' "${JCODE_HOME:-${HOME:-}/.jcode}"
+}
+
+# True when pid $1 is a jcode `serve` daemon: a jcode process with `serve` as a
+# standalone argument. Such a pid hosts many sessions and is never a lock anchor.
+fm_jcode_pid_is_daemon() {  # <pid>
+  local comm args word
+  comm=$(ps -o comm= -p "$1" 2>/dev/null) || return 1
+  [ "$(basename -- "$comm")" = jcode ] || return 1
+  args=$(ps -o args= -p "$1" 2>/dev/null) || return 1
+  for word in $args; do
+    [ "$word" != serve ] || return 0
+  done
+  return 1
+}
+
+# True when pid $1 is a live jcode process.
+fm_jcode_pid_alive() {  # <pid>
+  local comm
+  case "$1" in ''|*[!0-9]*) return 1 ;; esac
+  kill -0 "$1" 2>/dev/null || return 1
+  comm=$(ps -o comm= -p "$1" 2>/dev/null) || return 1
+  [ "$(basename -- "$comm")" = jcode ]
+}
+
+# Print the trusted jcode session id for this process, or return 1. $1 is this
+# process's harness ancestry (fm_harness_ancestry_pids).
+fm_session_lock_jcode_session_id() {  # <ancestry-pids>
+  local id=${JCODE_SESSION_ID:-} pids=$1 owner owner_file pid comm
+  [ -n "$id" ] || return 1
+  case "$id" in *[!A-Za-z0-9_.-]*) return 1 ;; esac
+  owner_file="$(fm_jcode_home)/active_pids/$id"
+  [ -f "$owner_file" ] && [ ! -L "$owner_file" ] || return 1
+  owner=$(head -n 1 "$owner_file" 2>/dev/null) || return 1
+  case "$owner" in ''|*[!0-9]*) return 1 ;; esac
+  while IFS= read -r pid; do
+    [ "$pid" = "$owner" ] || continue
+    comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
+    [ "$(basename -- "$comm")" = jcode ] || return 1
+    printf '%s\n' "$id"
+    return 0
+  done <<EOF
+$pids
+EOF
+  return 1
+}
+
+# Print the pid that anchors jcode session $1's lock, or return 1: a live TUI
+# client attached to that session (the newest when several are), else the
+# session's own owner process when that is not a shared daemon (an in-process
+# `jcode run`). A daemon-hosted session with no live client has no process of
+# its own, so it gets no anchor and stays read-only rather than recording a pid
+# every other session under that daemon would share.
+fm_session_lock_jcode_anchor_pid() {  # <session-id> <ancestry-pids>
+  local id=$1 pids=$2 dir file client best='' owner
+  dir="$(fm_jcode_home)/client_sessions"
+  if [ -d "$dir" ]; then
+    for file in "$dir"/*; do
+      [ -f "$file" ] && [ ! -L "$file" ] || continue
+      client=${file##*/}
+      case "$client" in ''|*[!0-9]*) continue ;; esac
+      [ "$(head -n 1 "$file" 2>/dev/null)" = "$id" ] || continue
+      fm_jcode_pid_alive "$client" || continue
+      fm_jcode_pid_is_daemon "$client" && continue
+      if [ -z "$best" ] || [ "$client" -gt "$best" ]; then best=$client; fi
+    done
+  fi
+  if [ -n "$best" ]; then
+    printf '%s\n' "$best"
+    return 0
+  fi
+  owner=$(_fm_harness_outermost_pid "$pids") || return 1
+  fm_jcode_pid_is_daemon "$owner" && return 1
+  printf '%s\n' "$owner"
 }
 
 # Print the session id recorded beside the lock in state dir $1, or return 1.
@@ -260,16 +367,43 @@ fm_session_lock_same_session() {  # <state> [<ancestry-pids>]
 # session, so "recorded pid dead" keeps meaning "session gone" instead of
 # wedging a home behind a live daemon whose session died. A replaced background
 # helper leaves a dead pid that its own session's next hook reclaims, because
-# the sidecar still names that session. Every other session records the
-# outermost pid of its contiguous run, exactly as before.
+# the sidecar still names that session. A jcode session with a trusted id
+# records its own TUI client (or in-process run) pid, never the shared daemon
+# (fm_session_lock_jcode_anchor_pid); one with no such process has no anchor.
+# Every other session records the outermost pid of its contiguous run, exactly
+# as before, except that a jcode `serve` daemon is never recorded because it
+# would make every session it hosts look like the owner.
 fm_session_lock_anchor_pid() {
-  local pids
+  local pids id outermost
   pids=$(fm_harness_ancestry_pids) || return 1
-  if fm_session_lock_trusted_session_id "$pids" >/dev/null; then
+  if fm_session_lock_claude_session_id "$pids" >/dev/null; then
     printf '%s\n' "$CLAUDE_PID"
     return 0
   fi
-  _fm_harness_outermost_pid "$pids"
+  if id=$(fm_session_lock_jcode_session_id "$pids"); then
+    fm_session_lock_jcode_anchor_pid "$id" "$pids"
+    return
+  fi
+  outermost=$(_fm_harness_outermost_pid "$pids") || return 1
+  fm_jcode_pid_is_daemon "$outermost" && return 1
+  printf '%s\n' "$outermost"
+}
+
+# Print why fm_session_lock_anchor_pid found no anchor, as one diagnostic line.
+# The generic line is the long-standing contract; a session whose only harness
+# ancestor is a shared jcode daemon gets the specific reason instead.
+fm_session_lock_anchor_failure_reason() {
+  local pids outermost
+  if pids=$(fm_harness_ancestry_pids) && outermost=$(_fm_harness_outermost_pid "$pids") \
+    && fm_jcode_pid_is_daemon "$outermost"; then
+    if [ -z "${JCODE_SESSION_ID:-}" ]; then
+      printf '%s\n' 'error: jcode session identity unavailable: JCODE_SESSION_ID is not set, and the shared jcode daemon cannot anchor a session lock'
+    else
+      printf '%s\n' 'error: jcode session identity unproven: this session has no live jcode client attached (client_sessions) or its id is not owned by this daemon (active_pids), and the shared jcode daemon cannot anchor a session lock'
+    fi
+    return 0
+  fi
+  printf '%s\n' 'error: cannot locate harness process in ancestry'
 }
 
 # True when state dir $1 holds a session lock that this process's session owns:
@@ -291,7 +425,9 @@ fm_session_lock_owned_by_self() {
     ''|*[!0-9]*) return 1 ;;
   esac
   pids=$(fm_harness_ancestry_pids) || return 1
-  fm_harness_pid_listed "$lock_pid" "$pids" && return 0
+  if fm_harness_pid_listed "$lock_pid" "$pids" && ! fm_jcode_pid_is_daemon "$lock_pid"; then
+    return 0
+  fi
   fm_session_lock_same_session "$state" "$pids" || return 1
   fm_harness_pid_alive "$lock_pid"
 }

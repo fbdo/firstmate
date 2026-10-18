@@ -1,0 +1,180 @@
+#!/usr/bin/env bash
+# fm-jcode-hook.sh - single entry point for every jcode lifecycle hook a
+# firstmate home registers (docs/turnend-guard.md "jcode", jcode's own
+# docs/HOOKS.md for the hook contract).
+#
+# jcode hooks are configured per machine ([hooks] in ~/.jcode/config.toml or the
+# JCODE_HOOK_* environment of the daemon), not per project, so this dispatcher
+# fires for every jcode session on the daemon. It therefore scopes itself first:
+# it acts only when the session's working directory (JCODE_HOOK_CWD) resolves to
+# this script's own firstmate checkout, and that checkout is a genuine primary
+# home (fm_primary_scope_matches). Every other session - a crewmate worktree, a
+# secondmate home that registers its own copy, an unrelated repo - is a silent
+# exit 0 that costs one git call. It never executes code from the session's
+# repository; each home registers its own copy of this script.
+#
+# Events (JCODE_HOOK_EVENT):
+#   pre_tool   GATE. stdin is the tool input JSON, JCODE_HOOK_TOOL_NAME the tool.
+#              Runs the existing PreToolUse seatbelts against it:
+#                bash   -> bin/fm-cd-pretool-check.sh and bin/fm-arm-pretool-check.sh
+#                swarm  -> bin/fm-subagent-pretool-check.sh --action <action>
+#                batch  -> each wrapped tool call, by the same rules
+#                other  -> bin/fm-subagent-pretool-check.sh --tool <name>
+#              A deny exits 2 with one plain reason line on stderr, which jcode
+#              returns to the model as the tool error. jcode treats any other
+#              exit, a timeout, or a missing binary as allow (fail open by
+#              jcode's design), and so does every seatbelt on malformed input.
+#   turn_end   OBSERVER. Runs bin/fm-turnend-guard.sh for this session. On its
+#              exit 2 it submits one hidden system reminder carrying the guard's
+#              banner through bin/fm-jcode-api.mjs, which starts one follow-up
+#              turn. The next turn_end of that same session is consumed without
+#              re-checking, so the follow-up is bounded to one per turn - the
+#              same shape as the Pi and Cursor adapters - and never loops.
+#   *          ignored (exit 0).
+#
+# The session id comes from JCODE_HOOK_SESSION_ID and is exported as
+# JCODE_SESSION_ID so bin/fm-session-lock-lib.sh can apply its jcode trust gate
+# from the hook process, whose only harness ancestor is the shared daemon.
+# JCODE_HOOKS_DISABLED=1 (always set by jcode for hook processes) keeps any
+# nested jcode call made here from re-triggering hooks.
+set -u
+
+SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" 2>/dev/null && pwd -P) || exit 0
+FM_ROOT=${FM_ROOT_OVERRIDE:-$(CDPATH='' cd -- "$SCRIPT_DIR/.." 2>/dev/null && pwd -P)} || exit 0
+EVENT=${JCODE_HOOK_EVENT:-}
+SESSION=${JCODE_HOOK_SESSION_ID:-}
+CWD=${JCODE_HOOK_CWD:-${PWD:-}}
+
+case "$EVENT" in
+  pre_tool|turn_end) ;;
+  *) exit 0 ;;
+esac
+
+# --- scope: this home's own primary session only ------------------------------
+[ -n "$CWD" ] || exit 0
+TOPLEVEL=$(git -C "$CWD" rev-parse --show-toplevel 2>/dev/null) || exit 0
+TOPLEVEL=$(CDPATH='' cd -- "$TOPLEVEL" 2>/dev/null && pwd -P) || exit 0
+[ "$TOPLEVEL" = "$FM_ROOT" ] || exit 0
+export FM_HOME=${FM_HOME:-$FM_ROOT}
+STATE=${FM_STATE_OVERRIDE:-$FM_HOME/state}
+# shellcheck source=bin/fm-primary-scope-lib.sh
+. "$SCRIPT_DIR/fm-primary-scope-lib.sh"
+fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
+case "$SESSION" in
+  ''|*[!A-Za-z0-9_.-]*) SESSION= ;;
+esac
+[ -z "$SESSION" ] || export JCODE_SESSION_ID="$SESSION"
+
+# Print the plain reason from a seatbelt's --claude deny object on stderr file
+# $1, falling back to the raw text when it is not that object.
+deny_reason() {  # <stderr-file>
+  local raw reason=''
+  raw=$(cat "$1" 2>/dev/null || true)
+  reason=$(printf '%s' "$raw" | json_query deny-reason 2>/dev/null || true)
+  printf '%s\n' "${reason:-$raw}"
+}
+
+# Read JSON on stdin and print one field, using node (already required by the
+# watcher-arm policy this dispatcher calls), so the dispatcher does not depend
+# on jq. Queries:
+#   string <key>   the top-level string field <key>, or nothing
+#   batch          one compact JSON object per wrapped call in .tool_calls
+#   deny-reason    .systemMessage of a seatbelt deny object
+# Prints nothing and exits nonzero when node is missing or the input is not a
+# JSON object, which every caller treats as allow (fail open).
+json_query() {  # <query> [<key>]
+  command -v node >/dev/null 2>&1 || return 1
+  node -e '
+    let s = "";
+    process.stdin.on("data", (d) => (s += d)).on("end", () => {
+      let v;
+      try { v = JSON.parse(s); } catch { process.exit(1); }
+      if (!v || typeof v !== "object" || Array.isArray(v)) process.exit(1);
+      const [q, key] = process.argv.slice(1);
+      if (q === "string") {
+        if (typeof v[key] === "string") process.stdout.write(v[key]);
+      } else if (q === "batch") {
+        for (const c of Array.isArray(v.tool_calls) ? v.tool_calls : []) {
+          if (c && typeof c === "object" && !Array.isArray(c)) process.stdout.write(JSON.stringify(c) + "\n");
+        }
+      } else if (q === "deny-reason") {
+        if (typeof v.systemMessage === "string") process.stdout.write(v.systemMessage);
+      }
+    });
+  ' "$@"
+}
+
+# Run one seatbelt; on deny print its reason and exit 2.
+run_seatbelt() {  # <script> <args...>
+  local err rc=0
+  err=$(mktemp "${TMPDIR:-/tmp}/fm-jcode-hook.XXXXXX") || return 0
+  "$@" --claude >/dev/null 2>"$err" || rc=$?
+  if [ "$rc" -eq 2 ]; then
+    deny_reason "$err" >&2
+    rm -f "$err"
+    exit 2
+  fi
+  rm -f "$err"
+}
+
+# Apply the seatbelts to one tool call: tool name $1, tool input JSON $2.
+check_tool_call() {  # <tool> <input-json>
+  local tool input lc command action inner calls
+  tool=$1
+  input=$2
+  LC_ALL=C lc=$(printf '%s' "$tool" | tr '[:upper:]' '[:lower:]')
+  case "$lc" in
+    bash)
+      command=$(printf '%s' "$input" | json_query string command) || return 0
+      [ -n "$command" ] || return 0
+      run_seatbelt "$SCRIPT_DIR/fm-cd-pretool-check.sh" --command "$command"
+      run_seatbelt "$SCRIPT_DIR/fm-arm-pretool-check.sh" --command "$command"
+      ;;
+    swarm)
+      action=$(printf '%s' "$input" | json_query string action) || action=''
+      run_seatbelt "$SCRIPT_DIR/fm-subagent-pretool-check.sh" --tool swarm --action "$action"
+      ;;
+    batch)
+      calls=$(printf '%s' "$input" | json_query batch) || return 0
+      while IFS= read -r inner; do
+        [ -n "$inner" ] || continue
+        check_tool_call "$(printf '%s' "$inner" | json_query string tool || true)" "$inner"
+      done <<EOF
+$calls
+EOF
+      ;;
+    *)
+      run_seatbelt "$SCRIPT_DIR/fm-subagent-pretool-check.sh" --tool "$tool"
+      ;;
+  esac
+}
+
+if [ "$EVENT" = pre_tool ]; then
+  INPUT=$(cat 2>/dev/null || true)
+  [ -n "${JCODE_HOOK_TOOL_NAME:-}" ] || exit 0
+  check_tool_call "$JCODE_HOOK_TOOL_NAME" "$INPUT"
+  exit 0
+fi
+
+# --- turn_end: bounded follow-up ----------------------------------------------
+[ -n "$SESSION" ] || exit 0
+[ -d "$STATE" ] || exit 0
+MARK="$STATE/.jcode-turnend-followup"
+if [ -f "$MARK" ] && [ "$(head -n 1 "$MARK" 2>/dev/null)" = "$SESSION" ]; then
+  rm -f "$MARK"
+  exit 0
+fi
+GUARD_ERR=$(mktemp "${TMPDIR:-/tmp}/fm-jcode-guard.XXXXXX") || exit 0
+rc=0
+printf '{"stop_hook_active":false}' | "$SCRIPT_DIR/fm-turnend-guard.sh" >/dev/null 2>"$GUARD_ERR" || rc=$?
+if [ "$rc" -ne 2 ]; then
+  rm -f "$GUARD_ERR"
+  exit 0
+fi
+printf '%s\n' "$SESSION" > "$MARK" 2>/dev/null || { rm -f "$GUARD_ERR"; exit 0; }
+{
+  printf '%s\n\n' 'Firstmate turn-end guard (bin/fm-turnend-guard.sh, delivered by bin/fm-jcode-hook.sh): TURN WOULD END BLIND - supervision is off. The watcher cycle is missing, failed, or unhealthy. Follow the recovery instruction below before ending the turn.'
+  cat "$GUARD_ERR"
+} | node "$SCRIPT_DIR/fm-jcode-api.mjs" remind "$SESSION" >/dev/null 2>&1 || rm -f "$MARK"
+rm -f "$GUARD_ERR"
+exit 0

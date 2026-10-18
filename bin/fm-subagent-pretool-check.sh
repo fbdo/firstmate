@@ -32,10 +32,19 @@
 #
 # Usage:
 #   <PreToolUse JSON on stdin> | bin/fm-subagent-pretool-check.sh
-#   bin/fm-subagent-pretool-check.sh --tool '<tool-name>'
+#   bin/fm-subagent-pretool-check.sh --tool '<tool-name>' [--action '<action>']
 #
 # Stdin mode extracts .tool_name for Claude and Codex, or .toolName for Grok.
-# CLI mode is for adapters that already hold the tool name (OpenCode, Pi).
+# CLI mode is for adapters that already hold the tool name (OpenCode, Pi,
+# jcode). --action carries the tool input's own `action` field for a
+# multi-action tool; stdin mode reads it from .tool_input.action or
+# .toolInput.action.
+#
+# Multi-action delegation tools: jcode's `swarm` tool both observes and creates
+# work behind one tool name, so its name alone cannot be classified. It is
+# allowed only with an action listed in JCODE_SWARM_OBSERVE_ACTIONS below and
+# denied with any other or a missing action, so a future mutating action is
+# refused before anyone updates the list.
 #
 # Exit/output contract (identical shape to bin/fm-cd-pretool-check.sh):
 #   ALLOW - exit 0 and no output.
@@ -62,8 +71,9 @@ DELEGATION_STEMS='agent subagent task workflow cron schedul worktree delegate sp
 # it, and denying these would strand already-running work with no way to inspect
 # or end it. A local Claude deny list may still remove these from the
 # schema; this shipped guard deliberately stays narrower so it can never be the
-# reason a runaway task cannot be stopped.
-OBSERVE_ONLY_TOOLS='taskoutput taskstop taskget tasklist cronlist bashoutput killshell'
+# reason a runaway task cannot be stopped. jcode's `agentgrep` is its read-only
+# code search tool; it matches the `agent` stem by name only and starts nothing.
+OBSERVE_ONLY_TOOLS='taskoutput taskstop taskget tasklist cronlist bashoutput killshell agentgrep'
 
 # Exact lowercase tool names that match a stem above but create no RUNNABLE
 # work. These write only the harness's session-local todo list, which has no
@@ -78,13 +88,20 @@ OBSERVE_ONLY_TOOLS='taskoutput taskstop taskget tasklist cronlist bashoutput kil
 # widen by accident.
 PLAN_ONLY_TOOLS='taskcreate taskupdate'
 
+# Exact jcode `swarm` actions that only read or report on swarm state (jcode
+# v0.98.1 tool schema). Everything else - spawn, assign_*, run_plan, fill_slots,
+# task_graph, message/dm/broadcast, stop, plan edits - creates, steers, or ends
+# swarm work the fleet does not track, and is denied on a primary home.
+JCODE_SWARM_OBSERVE_ACTIONS='status list list_models list_swarms list_channels channel_members summary read_context plan_status read'
+
 TOOL=""
 TOOL_SET=0
+ACTION=""
 CLAUDE_MODE=0
 
 usage() {
   cat <<'EOF'
-Usage: fm-subagent-pretool-check.sh [--tool <tool-name>] [--claude]
+Usage: fm-subagent-pretool-check.sh [--tool <tool-name>] [--action <action>] [--claude]
 
 With no --tool, reads a PreToolUse-style JSON payload on stdin (Claude/Codex
 tool_name, or Grok toolName).
@@ -117,6 +134,15 @@ while [ "$#" -gt 0 ]; do
       TOOL_SET=1
       shift
       ;;
+    --action)
+      [ "$#" -gt 1 ] || { echo "error: --action requires a value" >&2; exit 2; }
+      ACTION=$2
+      shift 2
+      ;;
+    --action=*)
+      ACTION=${1#--action=}
+      shift
+      ;;
     --claude)
       CLAUDE_MODE=1
       shift
@@ -138,6 +164,7 @@ if [ "$TOOL_SET" -eq 0 ]; then
   [ -n "$PAYLOAD" ] || exit 0
   command -v jq >/dev/null 2>&1 || exit 0
   TOOL=$(printf '%s' "$PAYLOAD" | jq -r '(.tool_name // .toolName // empty)' 2>/dev/null) || exit 0
+  ACTION=$(printf '%s' "$PAYLOAD" | jq -r '((.tool_input // .toolInput // {}) | objects | .action // empty) | strings' 2>/dev/null) || ACTION=
 fi
 
 [ -n "$TOOL" ] || exit 0
@@ -162,6 +189,13 @@ for stem in $DELEGATION_STEMS; do
     *"$stem"*) MATCHED=$stem; break ;;
   esac
 done
+if [ "$NORMALIZED" = swarm ]; then
+  LC_ALL=C NORMALIZED_ACTION=$(printf '%s' "$ACTION" | tr '[:upper:]' '[:lower:]')
+  for allowed in $JCODE_SWARM_OBSERVE_ACTIONS; do
+    [ "$NORMALIZED_ACTION" != "$allowed" ] || exit 0
+  done
+  MATCHED="swarm action ${ACTION:-<none>}"
+fi
 [ -n "$MATCHED" ] || exit 0
 
 # The single deliberate escape hatch. It is an environment variable rather than

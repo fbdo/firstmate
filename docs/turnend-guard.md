@@ -24,6 +24,7 @@ Do not infer this guard's scope, loop safety, or compatibility tradeoffs for tho
 | How each harness blocks or follows up | [Harness integrations](#harness-integrations) |
 | Claude's Stop auto-arm cooperation, block budget, and fail-open | [Claude cooperative mode](#claude-cooperative-mode) |
 | Cursor's parked hook | [Cursor park](#cursor-park) |
+| jcode's global hooks and reminder follow-up | [jcode](#jcode) |
 | Known gaps | [Compatibility limits](#compatibility-limits) |
 | Tests and live evidence | [Regression coverage](#regression-coverage) |
 
@@ -523,6 +524,22 @@ Cursor's `beforeSubmitPrompt` step fires once on a real captain message and does
 The step is now registered only for the [dialog mirror](supervision-host.md#the-dialog-mirror); it does not invalidate the park baton.
 Baton invalidation and the `preCompact` surface remain deferred.
 
+### jcode
+
+jcode exposes lifecycle hooks only per machine (`[hooks]` in `~/.jcode/config.toml`, or the `JCODE_HOOK_*` environment of the daemon), never per project, and its `turn_end` hook is an observer that cannot block.
+`bin/fm-jcode-hook.sh` is the single registered command for both events a firstmate home uses, `pre_tool` and `turn_end`.
+Because every jcode session on that daemon runs it, it first scopes itself: it acts only when the session's working directory resolves to the hook script's own checkout and that checkout passes [primary scope](#primary-scope), so crewmate worktrees, other homes, and unrelated repositories are a silent no-op.
+
+`pre_tool` is a real gate: exit 2 blocks the tool call and its stderr reaches the model.
+The dispatcher runs the existing seatbelts on that boundary - the cd guard and the watcher-arm policy for `bash`, the delegation guard for every other tool, and both for each call wrapped in jcode's `batch` tool.
+jcode's `swarm` tool is classified by its `action`, so read-only actions pass and every action that creates, steers, or stops swarm work is denied on a primary home (`bin/fm-subagent-pretool-check.sh` owns the list).
+jcode treats any other exit, a timeout, or a missing command as allow, so these seatbelts are fail open like every other harness's.
+
+`turn_end` runs the shared guard predicate.
+On exit 2 the dispatcher submits one hidden system reminder carrying the guard's banner to the same session through the jcode harness API (`bin/fm-jcode-api.mjs` over `jcode api-bridge --stdio`), which starts one follow-up turn.
+The latch `state/.jcode-turnend-followup` records the session it nudged; that session's next `turn_end` clears it without re-checking, so the follow-up is bounded to one per turn and can never loop.
+A reminder the daemon does not accept clears the latch and the turn ends unguarded, which the next pull-based `fm-guard.sh` call then reports.
+
 ### Adapter failures in the pull guard
 
 If a passive adapter cannot invoke its SDK, or the Grok legacy fallback cannot find `grok` or a session id, the next pull-based `fm-guard.sh` call reports the problem.
@@ -530,6 +547,7 @@ That warning uses `bin/fm-supervision-instructions.sh --repair-line`, so it alwa
 
 ## Compatibility limits
 
+- jcode's `turn_end` hook cannot block, so its backstop is one follow-up reminder rather than a block; see [jcode](#jcode).
 - Child crewmate and scout worktrees are outside scope.
 - A valid secondmate home is in scope.
   An idle secondmate endpoint with no Relay poll remains healthy because it has no supervision need.

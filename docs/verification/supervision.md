@@ -532,6 +532,24 @@ The timeout hook trapped `TERM`, backgrounded `sleep 300`, waited, and on `TERM`
 | Control, exit 2 before the timeout | started +2, exited 2 at +12 | `Stop hook feedback` followed by the requested reply |
 | Timeout, exit 2 from the `TERM` handler | started +2, `TERM` and exit 2 at +32 | no `Stop hook feedback` and no reply, still idle at +111 |
 
+### jcode primary hooks, 2026-10-18
+
+jcode was validated as a primary on 2026-10-18 with jcode v0.98.1 (1c7426eb1) on Linux arm64, against private daemons started with the published `@1jehuang/jcode-sdk` 1.2.0 `JcodeClient.launch()` (each with its own `JCODE_HOME` and runtime directory), so the user's shared daemon was never touched.
+Hooks were registered through the daemon environment (`JCODE_HOOK_PRE_TOOL`, `JCODE_HOOK_TURN_END`, `JCODE_HOOK_SESSION_START`), never through `~/.jcode/config.toml`.
+
+| Question | Method | Result |
+| --- | --- | --- |
+| Whose child is a tool shell? | process ancestry from a `bash` tool call | The shared `jcode serve` daemon; every session on it shares that pid, and the TUI client is not an ancestor. |
+| Which records identify a session? | `active_pids/` and `client_sessions/` while creating, attaching, and killing clients | `active_pids/<id>` names the daemon pid; `client_sessions/<client-pid>` names the attached session and survives `/quit` and `SIGKILL` of that client. |
+| Does `pre_tool` gate? | hook exits 2 on a marked `bash` command | The call was blocked and the model reported the hook's stderr text verbatim. |
+| Does the dispatcher fence `swarm`? | model told to call `swarm` with `status`, then `spawn` | `status` succeeded; `spawn` was blocked with the Firstmate reason; no extra session appeared. |
+| Does `turn_end` fire per turn? | hook logging with session id | Once per turn, including turns started by a reminder and turns ended by `cancel`. |
+| Does a system reminder start a turn? | `send_message` with `system_reminder` on an idle session | Yes. A new turn ran, the text was stored as a `system` `[auto]` message, and the model complied. |
+| Is the follow-up bounded? | `bin/fm-jcode-hook.sh` as `turn_end` on a disposable primary with one fake task and no watcher | Exactly one reminder carrying `TURN WOULD END BLIND` was delivered; the follow-up turn's own `turn_end` cleared the latch and sent nothing more (two `turn_done` events in total). |
+
+The lock was then exercised from the live jcode session that wrote this record, in a disposable lab home from `bin/fm-lab-home.sh`: `bin/fm-lock.sh` recorded the TUI client pid and the session id, a repeat acquisition reconfirmed it, the id of a different live session on the same daemon was refused as another live owner, an absent id was refused with the jcode-specific reason, and `bin/fm-session-start.sh` rendered the `jcode` supervision block.
+`tests/fm-jcode-harness.test.sh` is the portable regression for the same contracts.
+
 ## Watcher continuity
 
 The cross-harness evidence combines the 2026-07-17 live pass with Claude's replacement Stop-owned path revalidated on 2026-09-21, all against isolated project and home state.

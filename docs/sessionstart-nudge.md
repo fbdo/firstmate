@@ -43,6 +43,7 @@ Codex's interactive TUI has no tracked session-open, compaction, or re-emit chan
 | Grok | Nudge | [Grok](#grok) |
 | Cursor | Run | [Cursor](#cursor) |
 | omp | Run | [omp](#omp) |
+| jcode | Instruction only | [jcode](#jcode) |
 | Cursor compaction | Uncovered | [Cursor compaction](#cursor-compaction) |
 
 ### Why the run tier exists
@@ -367,6 +368,13 @@ So the source is derived following the Cursor precedent:
 
 A later in-process `clear` re-emits only when this lock owner completed a full startup.
 `before_agent_start` message delivery was verified to reach model context on 18.1.11.
+
+### jcode
+
+jcode is instruction-only: no session-open adapter is shipped.
+Its `session_start` hook is an observer whose output never reaches model context, and a hidden system reminder sent from it would start a turn the captain did not ask for.
+The always-loaded `AGENTS.md` section 3 instruction, which jcode places in every session's system prompt from the working directory, is what makes the primary run `bin/fm-session-start.sh`.
+Compaction and resume have no re-emit channel either.
 
 ### Cursor compaction
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Detect the agent harness this process tree runs on.
-# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|devin|commandcode|polytoken|unknown
+# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|devin|commandcode|polytoken|jcode|unknown
 #        fm-harness.sh crew             print the effective CREWMATE harness
 #                                        (config/crew-harness; "default" resolves to own)
 #        fm-harness.sh secondmate       print the harness the PRIMARY uses to launch
@@ -152,6 +152,12 @@ harness_marker() {
   # subprocesses is unverified (verified: muse 0.1.0-R708.1). Do NOT promote it
   # to a marker without verifying it reaches children AND that it cannot survive
   # in a multiplexer's stored environment.
+  # jcode exports JCODE_SESSION_ID (and JCODE_NON_INTERACTIVE=1) into every tool
+  # subprocess (verified, jcode v0.98.1), but it is deliberately NOT a marker
+  # here: it is ordinary inherited state that leaks into anything a jcode tool
+  # launches, while the anchored `jcode` process name below is structural. The
+  # session id is consumed only by bin/fm-session-lock-lib.sh, and only after the
+  # daemon's own active_pids record proves it belongs to the jcode ancestor.
   return 0
 }
 
@@ -257,6 +263,12 @@ harness_process_verdict() {  # <pid>
     # 1.74.1: comm=command-code and the rewritten argv is the same word).
     # Anchored, so an unrelated command containing that fragment never matches.
     command-code) echo "comm commandcode"; return ;;
+    # jcode is a single native binary whose process name is exactly `jcode` for
+    # the TUI client, the `jcode serve` daemon, and an in-process `jcode run`
+    # (verified, jcode v0.98.1 on Linux: tool subprocesses are children of the
+    # shared `jcode serve` daemon, whose comm is jcode). Anchored, never *jcode*,
+    # so an unrelated command containing that fragment never matches.
+    jcode) echo "comm jcode"; return ;;
     node*|python*)
       # Bare interpreter: match the harness name in its script path.
       args=$(ps -o args= -p "$pid" 2>/dev/null)
@@ -415,7 +427,7 @@ supervision_primary_pin() {
   local pin=${FM_SUPERVISION_PRIMARY_HARNESS:-}
   [ "${FM_SUPERVISION_ACTOR:-}" = branch ] && [ -n "$pin" ] || return 0
   case "$pin" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|devin|commandcode|polytoken)
+    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|devin|commandcode|polytoken|jcode)
       printf '%s\n' "$pin"
       ;;
     *)
