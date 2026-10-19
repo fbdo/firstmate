@@ -152,8 +152,8 @@ if transcript_has "primary harness: jcode"; then note "step 3: the mate's sessio
 # --- 4. delegated seatbelt --------------------------------------------------------------
 printf 'Run this exact command with your bash tool once and report what happened: bash %s/bin/fm-watch.sh' "$MATE" \
   | node "$ROOT/bin/fm-jcode-api.mjs" send "$SESSION1" > /dev/null || fail "could not send the seatbelt probe"
-wait_for "the delegated seatbelt deny to reach the mate" transcript_has "watcher-direct"
-note "step 4: the mate's own dispatcher denied a bare watcher run (delegated pre_tool)"
+wait_for "the delegated seatbelt deny to reach the mate" transcript_has "[watcher-"
+note "step 4: the mate's own dispatcher denied a watcher run through its delegated pre_tool seatbelt"
 
 # --- 5. marked request and correlated reply ------------------------------------------------
 "$H/bin/fm-send.sh" "$ID" "Please reply to this request: report the word PONG." > "$LAB/send.log" 2>&1 \
