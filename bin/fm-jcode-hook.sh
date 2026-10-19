@@ -71,7 +71,7 @@ export FM_HOME=${FM_HOME:-$FM_ROOT}
 STATE=${FM_STATE_OVERRIDE:-$FM_HOME/state}
 
 # --- scope: a jcode worker of this home ---------------------------------------
-if [ "$EVENT" != pre_tool ] && [ -d "$STATE" ]; then
+if [ -d "$STATE" ]; then
   # shellcheck source=bin/fm-jcode-lib.sh
   . "$SCRIPT_DIR/fm-jcode-lib.sh"
   if BOUND=$(fm_jcode_session_task "$STATE" "$SESSION"); then
@@ -80,6 +80,49 @@ $BOUND
 EOF
     TASK_WT=$(CDPATH='' cd -- "$TASK_WT" 2>/dev/null && pwd -P) || exit 0
     [ "$TOPLEVEL" = "$TASK_WT" ] || exit 0
+    if [ "$EVENT" = pre_tool ]; then
+      # Worker fence (amended D12): subagents stay inside the worker's own swarm.
+      # Only the swarm tool (and swarm calls inside batch) is examined, and the
+      # fence fails open on anything it cannot parse, like every other seatbelt.
+      INPUT=$(cat 2>/dev/null || true)
+      case "$(printf '%s' "${JCODE_HOOK_TOOL_NAME:-}" | tr '[:upper:]' '[:lower:]')" in
+        swarm|batch)
+          if command -v node >/dev/null 2>&1; then
+            DENY=$(printf '%s' "$INPUT" | node -e '
+              let s = "";
+              process.stdin.on("data", (d) => (s += d)).on("end", () => {
+                let v;
+                try { v = JSON.parse(s); } catch { process.exit(0); }
+                const tool = (process.argv[1] || "").toLowerCase();
+                const calls = tool === "batch" ? (Array.isArray(v?.tool_calls) ? v.tool_calls : []) : [{ tool: "swarm", ...v }];
+                const banned = new Set(["set_swarm_label", "approve_plan", "propose_plan", "run_plan"]);
+                for (const c of calls) {
+                  if (!c || typeof c !== "object" || String(c.tool || "").toLowerCase() !== "swarm") continue;
+                  if ((typeof c.to_swarm === "string" && c.to_swarm !== "") || banned.has(c.action) || (c.action === "assign_role" && c.role === "coordinator")) {
+                    process.stdout.write("Firstmate worker: subagents stay inside your own swarm; report to Firstmate through the status file");
+                    return;
+                  }
+                }
+              });
+            ' "${JCODE_HOOK_TOOL_NAME:-}" 2>/dev/null || true)
+            if [ -n "$DENY" ]; then
+              printf '%s\n' "$DENY" >&2
+              exit 2
+            fi
+          fi
+          ;;
+      esac
+      exit 0
+    fi
+    # The keeper owns busy/idle for a native (backend=jcode) task, so the hook
+    # writes no busy record for it (amended D10); pane-backend jcode tasks keep it.
+    if [ "$(fm_jcode_meta_value "$STATE/$TASK_ID.meta" backend)" = jcode ]; then
+      if [ "$EVENT" = turn_end ] && [ "${JCODE_HOOK_STATUS:-}" = error ] \
+        && STOP_REASON=$(fm_jcode_silent_stop_reason "${JCODE_HOOK_ERROR:-}"); then
+        fm_jcode_report_blocked "$STATE" "$TASK_ID" "$STOP_REASON" || true
+      fi
+      exit 0
+    fi
     if [ "$EVENT" = turn_start ]; then
       "$SCRIPT_DIR/fm-busy-event.sh" apply "$STATE" "$TASK_ID" busy --gen "$TASK_GEN" \
         --source jcode-hook --event turn-start >/dev/null 2>&1 || true
