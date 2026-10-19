@@ -2767,9 +2767,44 @@ if [ "$HARNESS" = commandcode ] && [ "$BACKEND" != tmux ] && [ "$BACKEND" != her
   exit 1
 fi
 
+# Native jcode runtime (docs/jcode-backend.md): config/jcode-runtime=native
+# routes a jcode crewmate/scout to backend=jcode when nothing named a backend
+# explicitly. It is never auto-detected, and only the jcode harness may run on it.
+if [ "$RELAUNCH" -eq 0 ] && [ "$BACKEND_SET" -eq 0 ] && [ -z "${FM_BACKEND:-}" ] && [ "$HARNESS" = jcode ] &&
+  [ "$KIND" != secondmate ] && [ -f "$CONFIG/jcode-runtime" ] &&
+  [ "$(tr -d '[:space:]' <"$CONFIG/jcode-runtime")" = native ]; then
+  BACKEND=jcode
+  fm_backend_source jcode || exit 1
+fi
+if [ "$BACKEND" = jcode ] && [ "$HARNESS" != jcode ]; then
+  echo "error: backend=jcode runs only the jcode harness, not '$HARNESS'" >&2
+  exit 1
+fi
+if [ "$BACKEND" = jcode ] && [ "$KIND" = secondmate ]; then
+  echo "error: backend=jcode does not support --secondmate spawns" >&2
+  exit 1
+fi
+if [ "$BACKEND" = jcode ] && [ "$RELAUNCH" -eq 1 ]; then
+  echo "error: a backend=jcode task is relaunched with bin/fm-control.sh relaunch, not fm-spawn" >&2
+  exit 1
+fi
+if [ "$BACKEND" = jcode ]; then
+  if [ -z "$MODEL" ] || [ "$MODEL" = default ]; then
+    echo "error: the native jcode backend needs an explicit model (the daemon default for API sessions is unpredictable); pass --model" >&2
+    exit 1
+  fi
+  "$SCRIPT_DIR/fm-jcode-setup.sh" status >/dev/null 2>&1 || {
+    echo "error: this home's jcode hooks are not registered (bin/fm-jcode-setup.sh status); the worker fence needs them" >&2
+    exit 1
+  }
+  fm_backend_jcode_runtime_check || exit 1
+  eval "$("$SCRIPT_DIR/fm-jcode-keeper.sh" env)"
+  export JCODE_SOCKET JCODE_API_SOCKET
+fi
+
 # jcode's exit stops the pane's client and is proven by the backend's agent
 # state, which only tmux and herdr can classify (bin/fm-control-lib.sh).
-if [ "$HARNESS" = jcode ] && [ "$BACKEND" != tmux ] && [ "$BACKEND" != herdr ]; then
+if [ "$HARNESS" = jcode ] && [ "$BACKEND" != tmux ] && [ "$BACKEND" != herdr ] && [ "$BACKEND" != jcode ]; then
   echo "error: jcode is supported on the tmux and herdr backends only; backend=$BACKEND cannot prove its client stopped. Select backend tmux or herdr." >&2
   exit 1
 fi
@@ -4518,6 +4553,11 @@ EOF
     fi
     T="$CMUX_WORKSPACE_ID:$CMUX_SURFACE_ID"
     ;;
+  jcode)
+    # No pane: the endpoint is the API session created below, once the worktree
+    # exists. T is a placeholder until then.
+    T="jcode:pending"
+    ;;
   orca)
     set +e
     ORCA_WT_RAW=$(fm_backend_orca_worktree_create "$PROJ_ABS" "$W")
@@ -4605,6 +4645,7 @@ spawn_send_key() { # <target> <key>
 # launch boundary and makes a dropped or ignored cwd change a refusal.
 spawn_enter_recorded_worktree() {
   [ "$KIND" = secondmate ] && return 0
+  [ "$BACKEND" = jcode ] && return 0
   spawn_send_text_line "$WT_TARGET" "cd -- $(shell_quote "$WT")" || {
     echo "error: task $ID's endpoint could not be moved into its recorded worktree '$WT'; refusing to launch outside the copy holding its work" >&2
     exit 1
@@ -4618,6 +4659,7 @@ spawn_assert_agent_worktree() {
   local expected seen i
   [ "$KIND" = secondmate ] && return 0
   [ "$BACKEND" = orca ] && return 0
+  [ "$BACKEND" = jcode ] && return 0
   expected=$(real_path_or_raw "$WT")
   for i in $(seq 1 20); do
     seen=$(spawn_current_path "$WT_TARGET" || true)
@@ -5027,6 +5069,50 @@ polytoken_spawn_fail() {  # <detail>
 # registered on the daemon that hosts the session.
 JCODE_SESSION=
 JCODE_READY_FAILURE=
+# Native backend (docs/jcode-backend.md): create the worker session in the leased
+# worktree through this home's API bridge, title it, and bind it to the task. The
+# model is always explicit (the daemon default for API sessions is unpredictable).
+jcode_native_create() {
+  local args=(create "$WT" --model "$MODEL" --note "Firstmate worker session for task $ID. The launch brief follows as the next message.")
+  local api=("$SCRIPT_DIR/fm-jcode-api.mjs" --socket "$JCODE_API_SOCKET")
+  [ -z "$EFFORT" ] || [ "$EFFORT" = default ] || args+=(--effort "$EFFORT")
+  JCODE_SESSION=$(node "${api[@]}" "${args[@]}") && [ -n "$JCODE_SESSION" ] || {
+    echo "error: could not create the jcode worker session for $ID (model '$MODEL')" >&2
+    return 1
+  }
+  fm_jcode_write_session_record "$STATE_REAL" "$ID" "$JCODE_SESSION" "${BUSY_GEN:-}" "$WT" || {
+    echo "error: could not bind jcode session $JCODE_SESSION to task $ID" >&2
+    return 1
+  }
+  node "${api[@]}" rename "$JCODE_SESSION" "fm:$ID" >/dev/null 2>&1 || true
+  T="jcode:$JCODE_SESSION"
+}
+
+# Wait for the keeper to hold the session, deliver the brief, and wait for the
+# keeper's first busy record for the brief turn (not the hook).
+jcode_native_deliver() {
+  local polls=${FM_JCODE_READY_POLLS:-120} interval=${FM_JCODE_POLL_INTERVAL:-0.5} i=0 live=$STATE_REAL/jcode/live/$JCODE_SESSION
+  "$SCRIPT_DIR/fm-jcode-keeper.sh" ensure >/dev/null 2>&1 || true
+  while [ "$i" -lt "$polls" ] && [ ! -f "$live" ]; do i=$((i + 1)); sleep "$interval"; done
+  if [ ! -f "$live" ]; then
+    JCODE_READY_FAILURE="the keeper never attached jcode session $JCODE_SESSION, so the brief was not sent"
+    return 1
+  fi
+  if ! "$FM_ROOT/bin/fm-operational-input.sh" encode launch-brief <"$BRIEF" |
+    node "$SCRIPT_DIR/fm-jcode-api.mjs" --socket "$JCODE_API_SOCKET" send "$JCODE_SESSION" >/dev/null; then
+    JCODE_READY_FAILURE="the brief could not be delivered to jcode session $JCODE_SESSION"
+    return 1
+  fi
+  i=0
+  while [ "$i" -lt "$polls" ]; do
+    grep -q '^busy' "$live" 2>/dev/null && return 0
+    i=$((i + 1))
+    sleep "$interval"
+  done
+  JCODE_READY_FAILURE="jcode session $JCODE_SESSION never reported a busy turn for its brief through the keeper"
+  return 1
+}
+
 jcode_wait_for_ready() {
   local polls=${FM_JCODE_READY_POLLS:-120} interval=${FM_JCODE_POLL_INTERVAL:-0.5} i=0 record
   if ! fm_jcode_wait_client "$JCODE_SESSION" "$polls" "$interval" >/dev/null; then
@@ -5051,6 +5137,12 @@ jcode_wait_for_ready() {
 
 jcode_spawn_fail() {  # <detail>
   printf '%s\n' "$(status_stamp_line "failed: $1")" >>"$STATE/$ID.status"
+  if [ "$BACKEND" = jcode ]; then
+    echo "error: $1" >&2
+    clear_relaunch_harness_wiring jcode "$WT" "$STATE_REAL" "$ID" || true
+    [ -z "$JCODE_SESSION" ] || node "$SCRIPT_DIR/fm-jcode-api.mjs" --socket "$JCODE_API_SOCKET" archive "$JCODE_SESSION" >/dev/null 2>&1 || true
+    return 0
+  fi
   echo "error: $1; inspect window $T" >&2
   # Close the endpoint first, so its client cannot start a turn on the session
   # being retired, then retire the session binding and hide the session.
@@ -5094,6 +5186,21 @@ elif [ "$RELAUNCH" -eq 1 ]; then
     fi
   fi
   [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
+elif [ "$BACKEND" = jcode ]; then
+  # No pane to run an interactive `treehouse get`: take a durable lease instead
+  # (the path bin/fm-home-seed.sh uses), then run the same isolation proof.
+  WT=$(cd "$PROJ_ABS" && treehouse get --lease --lease-holder "fm-$ID") || {
+    echo "error: treehouse get --lease failed for $ID" >&2
+    exit 1
+  }
+  validate_spawn_worktree "treehouse get --lease" "$WT"
+  if fm_treehouse_pool_slot "$PROJ_ABS" "$WT"; then
+    fm_treehouse_slot_owner_claim "$WT" "$ID" "$FM_HOME" || {
+      echo "error: could not claim Treehouse pool slot $WT for task $ID" >&2
+      exit 1
+    }
+    SPAWN_SLOT_CLAIMED=1
+  fi
 elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   spawn_send_text_line "$WT_TARGET" 'treehouse get'
 
@@ -5814,7 +5921,9 @@ EOF
     # the hook dispatcher. Nothing is written into the worktree. A relaunch
     # gets a fresh session in the same worktree. Gated on the canonical
     # template, because a raw launch command never resumes this session.
-    if [ "$RAW_LAUNCH" -eq 0 ]; then
+    if [ "$BACKEND" = jcode ]; then
+      jcode_native_create || exit 1
+    elif [ "$RAW_LAUNCH" -eq 0 ]; then
       jcode_create_args=(create "$WT" --note "Firstmate worker session for task $ID. The launch brief follows as the next message.")
       [ -z "$MODEL" ] || [ "$MODEL" = default ] || jcode_create_args+=(--model "$MODEL")
       [ -z "$EFFORT" ] || [ "$EFFORT" = default ] || jcode_create_args+=(--effort "$EFFORT")
@@ -5928,7 +6037,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo branch tasktmp base_branch upstream_consent forge backup_remote backup_prefix model effort account account_provider busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx polytoken_session polytoken_port polytoken_credential jcode_session jcode_home jcode_runtime_dir jcode_socket", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo branch tasktmp base_branch upstream_consent forge backup_remote backup_prefix model effort account account_provider busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx polytoken_session polytoken_port polytoken_credential jcode_session jcode_home jcode_runtime_dir jcode_socket jcode_api_socket", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -5991,7 +6100,7 @@ preserve_relaunch_meta() {
   # endpoint identity every later control call uses (bin/fm-jcode-lib.sh).
   if [ -n "${JCODE_SESSION:-}" ]; then
     echo "jcode_session=$JCODE_SESSION"
-    fm_jcode_daemon_meta_lines
+    FM_JCODE_NATIVE=$([ "$BACKEND" = jcode ] && echo 1 || echo 0) fm_jcode_daemon_meta_lines
   fi
   if [ "$RELAUNCH" -eq 1 ]; then
     preserve_relaunch_meta
@@ -6089,6 +6198,14 @@ fi
 "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort || true
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
 
+if [ "$BACKEND" = jcode ]; then
+  # Native backend: no pane launch. Deliver the brief through the API and fall
+  # through to the commit point below.
+  if ! jcode_native_deliver; then
+    jcode_spawn_fail "$JCODE_READY_FAILURE"
+    exit 1
+  fi
+else
 sq_brief=$(shell_quote "$BRIEF")
 sq_turnend=$(shell_quote "$TURNEND")
 sq_piext=$(shell_quote "$STATE/$ID.pi-ext.ts")
@@ -6610,6 +6727,7 @@ if [ "$HARNESS" = jcode ] && [ "$RAW_LAUNCH" -eq 0 ]; then
     exit 1
   fi
 fi
+fi # end of the pane launch (BACKEND != jcode)
 
 if [ "$KIND" = secondmate ] && [ "${FM_SKIP_SECONDMATE_INHERIT:-0}" != 1 ]; then
   if ! fm_config_reread_discard_pending "$PROJ_ABS" "$ID" "$FM_HOME"; then

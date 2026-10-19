@@ -287,6 +287,8 @@ function markIdle(session, detail) {
 
 async function attach(session, h) {
   h.attaching = true;
+  const delay = Number(process.env.FM_JCODE_KEEPER_ATTACH_DELAY_MS || 0);
+  if (delay > 0) await new Promise((r) => setTimeout(r, delay));
   const conn = await connect(
     (frame) => {
       if (frame.session_id === session || frame.ev === "soft_interrupt_injected") onEvent(session, frame);
