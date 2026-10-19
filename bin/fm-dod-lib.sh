@@ -712,6 +712,23 @@ fm_dod_should_gate_ship_done() {  # <kind> <mode> <line>
   esac
 }
 
+# 0 when <line> is a no-mistakes ship's pre-validation `done: {summary}`: the
+# implementation handoff after which the worker waits for its supervisor's go
+# to run /no-mistakes. It is the exact complement of the gate above within a
+# no-mistakes ship's done lines (the later CI-ready or published done is gated).
+# A forge=external ship ends in an uploaded review instead, so it never matches.
+# bin/fm-crew-state.sh reports it as awaiting-go while no run is attributed.
+fm_dod_is_pipeline_handoff_done() {  # <kind> <mode> <line> [<meta>]
+  [ "$1" = ship ] || return 1
+  [ "$(status_line_verb "$3")" = "done" ] || return 1
+  case "$2" in no-mistakes|'') ;; *) return 1 ;; esac
+  if [ -n "${4:-}" ] && [ "$(fm_dod_meta_value "$4" forge)" = external ]; then
+    return 1
+  fi
+  fm_dod_should_gate_ship_done "$1" "$2" "$3" && return 1
+  return 0
+}
+
 # The PR/MR URL from a `done: PR <url>...` note, or empty.
 fm_dod_pr_url_from_done_note() {  # <note>
   local note=$1 url

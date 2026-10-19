@@ -25,6 +25,8 @@ SCRIPT_DIR="$(d=${BASH_SOURCE[0]%/*}; [ "$d" != "${BASH_SOURCE[0]}" ] || d=.; cd
 . "$SCRIPT_DIR/fm-classify-lib.sh"
 # shellcheck source=bin/fm-line-cap-lib.sh
 . "$SCRIPT_DIR/fm-line-cap-lib.sh"
+# shellcheck source=bin/fm-dod-lib.sh
+. "$SCRIPT_DIR/fm-dod-lib.sh"
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
 # shellcheck source=bin/fm-lease-lib.sh
@@ -512,6 +514,48 @@ EOF
   printf "OPEN DECISIONS: close one by answering it: bin/fm-send.sh <task> --resolve-key <key> '<answer>'\n" || return 1
 }
 
+# Print the AWAITING PIPELINE GO section: every no-mistakes ship in this home
+# whose latest event is the no-PR implementation `done:` and which has no active
+# run, so its worker is idle waiting for the supervisor to send the go to run
+# /no-mistakes. Nothing queues a wake for a worker that stays quiet after that
+# done, so the section repeats on every drain until the go is sent (the run then
+# attributes and bin/fm-crew-state.sh stops reporting awaiting-go). Home-scoped,
+# so a secondmate's own drain surfaces its workers to the secondmate. A cheap
+# status-log pre-filter keeps fm-crew-state.sh (which may make a bounded
+# no-mistakes call) off every task but the candidates. Bounded and silent when
+# nothing awaits the go, and a failed read of one task never fails the drain.
+print_awaiting_go_section() {
+  local f id meta line mode kind state_line shown=0 omitted=0 max=10 note
+  for f in "$STATE"/*.status; do
+    [ -f "$f" ] || continue
+    id=${f##*/}
+    id=${id%.status}
+    meta="$STATE/$id.meta"
+    [ -f "$meta" ] || continue
+    kind=$(fm_dod_meta_value "$meta" kind)
+    [ -n "$kind" ] || kind=ship
+    mode=$(fm_dod_meta_value "$meta" mode)
+    line=$(status_current_line "$f" "$kind")
+    fm_dod_is_pipeline_handoff_done "$kind" "$mode" "$line" "$meta" || continue
+    state_line=$(FM_STATE_OVERRIDE="$STATE" "${FM_CREW_STATE_BIN:-$SCRIPT_DIR/fm-crew-state.sh}" "$id" 2>/dev/null | head -1) || continue
+    case "$state_line" in "state: awaiting-go"*) ;; *) continue ;; esac
+    if [ "$shown" -ge "$max" ]; then
+      omitted=$((omitted + 1))
+      continue
+    fi
+    if [ "$shown" -eq 0 ]; then
+      printf 'AWAITING PIPELINE GO (implementation handed off, no pipeline run yet - the worker is waiting for your go):\n' || return 1
+    fi
+    note=$(status_line_note "$line")
+    fm_cap_line_var "$id: $note" 199
+    printf '%s\n' "$FM_LINE_CAP_LINE" || return 1
+    shown=$((shown + 1))
+  done
+  [ "$shown" -gt 0 ] || return 0
+  [ "$omitted" -eq 0 ] || printf 'AWAITING PIPELINE GO: %d more omitted\n' "$omitted" || return 1
+  printf "AWAITING PIPELINE GO: send each worker the go with bin/fm-send.sh <task> 'run /no-mistakes' (a secondmate's workers are the secondmate's to send)\n" || return 1
+}
+
 # Print the RECORD DIVERGENCE section: every captain call whose two records
 # contradict each other - the status log says a key was resolved outright while
 # the task held for the captain is still open. Nothing here closes anything; the
@@ -758,7 +802,8 @@ print_status_sections() {
     print_unread_status_section "$snapshot" \
       && print_status_outcome_backstop_section "$snapshot" \
       && print_open_decisions_section "$snapshot" \
-      && print_record_divergence_section
+      && print_record_divergence_section \
+      && print_awaiting_go_section
   } > "$prepared"; then
     rm -f -- "$prepared"
     return 1

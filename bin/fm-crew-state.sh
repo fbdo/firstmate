@@ -24,7 +24,7 @@
 # Output is one stable, parseable, token-tight line firstmate can read every
 # heartbeat:
 #
-#   state: <working|parked|done|blocked|paused|failed|unknown> · source: <run-step|pane|status-log|remote-endpoint|none> · <detail>
+#   state: <working|parked|done|awaiting-go|blocked|paused|failed|unknown> · source: <run-step|pane|status-log|remote-endpoint|none> · <detail>
 #
 # Logic, in order:
 #   1. Resolve worktree + backend target + kind from state/<id>.meta. A meta
@@ -1366,6 +1366,13 @@ fi
 # `unknown` verdict as the "not a state" test needs no second verb list here.
 if [ -n "$LOG_VERB" ]; then
   if [ "$LOG_VERB" = "done" ]; then
+    # A no-mistakes ship's first no-PR done: is the implementation handoff, and
+    # this point is reached only with no run attributed and no busy harness, so
+    # the worker is idle waiting for the supervisor's go to run /no-mistakes.
+    # Reporting it distinctly keeps it from reading as in-progress or finished.
+    if fm_dod_is_pipeline_handoff_done "$KIND" "$(meta_value mode)" "$LOG_LINE" "$META"; then
+      emit awaiting-go status-log "$(status_line_note "$LOG_LINE")${SEP}implementation handed off, no pipeline run yet: send the go to run /no-mistakes"
+    fi
     emit_ship_status_done
   fi
   LOG_STATE=$(map_log_state "$LOG_LINE")

@@ -5892,6 +5892,31 @@ test_terminal_rebased_run_is_not_attributed
 test_competing_live_runs_report_unknown_with_both_ids
 test_newer_failed_run_is_not_hidden_by_older_live_run
 test_unverifiable_run_selection_reports_unknown
+# A no-mistakes ship whose latest event is the no-PR implementation done: and
+# that has no run is idle waiting for the supervisor's go, never "done" or "working".
+test_no_pr_done_with_no_run_awaits_the_go() {
+  reset_fakes
+  local d; d=$(new_case awaiting-go)
+  make_repo_on_branch "$d/wt" fm/feat-ag
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-ag.meta" "window=fm:fm-feat-ag" "worktree=$d/wt" \
+    "kind=ship" "mode=no-mistakes" "harness=claude"
+  printf 'done: implemented and committed\n' > "$d/state/feat-ag.status"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" feat-ag
+  local out; out=$(run_crew_state "$d" feat-ag)
+  assert_contains "$out" "state: awaiting-go" "no-PR done with no run awaits the go"
+  assert_contains "$out" "send the go" "the detail names the action"
+  # A direct-PR ship's done is a real done (gated on the named head), not a handoff.
+  fm_write_meta "$d/state/feat-ag.meta" "window=fm:fm-feat-ag" "worktree=$d/wt" \
+    "kind=ship" "mode=direct-PR" "harness=claude"
+  out=$(run_crew_state "$d" feat-ag)
+  assert_not_contains "$out" "awaiting-go" "only no-mistakes ships await the go"
+  pass "a no-mistakes ship's no-PR done with no run reports awaiting-go"
+}
+
 test_legacy_conflicting_run_records_report_unknown
+test_no_pr_done_with_no_run_awaits_the_go
 
 echo "all fm-crew-state tests passed"
