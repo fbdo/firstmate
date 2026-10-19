@@ -5947,8 +5947,10 @@ EOF
       [ -z "$MODEL" ] || [ "$MODEL" = default ] || jcode_create_args+=(--model "$MODEL")
       [ -z "$EFFORT" ] || [ "$EFFORT" = default ] || jcode_create_args+=(--effort "$EFFORT")
       JCODE_PRIOR_SESSION=
-      if [ "$RELAUNCH" -eq 1 ] && [ "$KIND" = secondmate ]; then
-        JCODE_PRIOR_SESSION=$(fm_meta_get "$RELAUNCH_META" jcode_session)
+      # A secondmate respawn (liveness recovery or --relaunch) finds the previous
+      # incarnation's session in the task record it is about to replace.
+      if [ "$KIND" = secondmate ] && [ -f "$STATE/$ID.meta" ]; then
+        JCODE_PRIOR_SESSION=$(fm_meta_get "$STATE/$ID.meta" jcode_session)
       fi
       if [ "$KIND" = secondmate ]; then
         JCODE_ALLOW_DEFAULT=

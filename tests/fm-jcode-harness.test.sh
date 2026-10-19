@@ -986,6 +986,19 @@ EOF
   assert_contains "$(cat "$dir/launch.log")" "--resume 'session_fake_1' --no-update --no-selfdev" "the pane must resume the created session"
   pass "fm-spawn: a jcode secondmate gets a session in its home, bound in the main state, titled, and resumed in its pane"
 
+  # Respawn (what liveness recovery runs): a fresh session, and the previous one
+  # is archived only after the new one reported ready.
+  : > "$fb/.spawn-window"  # liveness recovery kills the dead endpoint first
+  rc=0
+  out=$(run_jcode_secondmate_spawn "$rec" "$id" --harness jcode --model fake/good --effort low) || rc=$?
+  expect_code 0 "$rc" "a secondmate respawn should succeed (output: $out)"
+  assert_grep 'jcode_session=session_fake_2' "$meta" "the respawn must bind a fresh session"
+  assert_contains "$(cat "$dir/api.log")" '"req":"archive_session","session":"session_fake_1"' "the previous session must be archived"
+  [ "$(grep -n '"req":"archive_session","session":"session_fake_1"' "$dir/api.log" | head -1 | cut -d: -f1)" -gt \
+    "$(grep -n '"no_reply":false' "$dir/api.log" | tail -1 | cut -d: -f1)" ] \
+    || fail "the previous session must be archived only after the new brief turn was sent"
+  pass "fm-spawn: a jcode secondmate respawn starts a fresh session and archives the previous one after readiness"
+
   rec=$(make_jcode_secondmate_case nomodel jcsm2)
   rc=0
   out=$(run_jcode_secondmate_spawn "$rec" jcsm2 --harness jcode) || rc=$?
@@ -1015,7 +1028,61 @@ EOF
   pass "fm-spawn: a jcode secondmate refuses without a model, with a polluted daemon environment, and on the native backend"
 }
 
+# A main home and a secondmate home held at once under one daemon: distinct
+# client anchors and session ids, each home's lock refuses the other's session.
+test_two_homes_one_daemon_locks() {
+  local home client_main client_mate rc out
+  home="$TMP_ROOT/two-homes"
+  make_jcode_home "$home"
+  mkdir -p "$home/state-main" "$home/state-mate"
+  client_main=$(start_client "$home" session_main)
+  client_mate=$(start_client "$home" session_mate)
+  export FM_TEST_OWNED='session_main session_mate'
+  printf '%s\n' "$client_main" > "$home/state-main/.lock"
+  printf '%s\n' session_main > "$home/state-main/.lock-session"
+  printf '%s\n' "$client_mate" > "$home/state-mate/.lock"
+  printf '%s\n' session_mate > "$home/state-mate/.lock-session"
+  rc=0
+  daemon_eval "$home" session_main 'fm_session_lock_owned_by_self "$JCODE_HOME/state-main"' || rc=$?
+  [ "$rc" -eq 0 ] || fail "the main session must own the main lock"
+  rc=0
+  daemon_eval "$home" session_mate 'fm_session_lock_owned_by_self "$JCODE_HOME/state-mate"' || rc=$?
+  [ "$rc" -eq 0 ] || fail "the mate session must own the mate lock"
+  rc=0
+  daemon_eval "$home" session_mate 'fm_session_lock_owned_by_self "$JCODE_HOME/state-main"' || rc=$?
+  [ "$rc" -ne 0 ] || fail "the mate session must not own the main lock"
+  rc=0
+  daemon_eval "$home" session_main 'fm_session_lock_owned_by_self "$JCODE_HOME/state-mate"' || rc=$?
+  [ "$rc" -ne 0 ] || fail "the main session must not own the mate lock"
+  out=$(daemon_eval "$home" session_mate 'fm_session_lock_foreign_owner_live "$JCODE_HOME/state-main" && printf "%s\n" "$FM_SESSION_LOCK_FOREIGN_OWNER_PID"')
+  [ "$out" = "$client_main" ] || fail "the mate must see the main client as the foreign live owner of the main lock, got '$out'"
+  kill "$client_main" "$client_mate" 2>/dev/null
+  wait "$client_main" "$client_mate" 2>/dev/null
+  unset FM_TEST_OWNED
+  pass "session lock: main and secondmate homes hold locks at once under one daemon and refuse each other's session"
+}
+
+# The ownership guard reads only this home's state, so the main home never
+# mutates a session bound only in a secondmate home's state.
+test_main_guard_refuses_mate_crew() {
+  local main mate
+  main="$TMP_ROOT/own-main"
+  mate="$TMP_ROOT/own-mate"
+  mkdir -p "$main/state" "$mate/state"
+  # shellcheck source=bin/fm-jcode-lib.sh
+  . "$ROOT/bin/fm-jcode-lib.sh"
+  fm_jcode_write_session_record "$main/state" mate1 session_mate 1 "$mate"
+  fm_jcode_write_session_record "$mate/state" crew1 session_crew 1 "$TMP_ROOT"
+  fm_jcode_owned_session "$main/state" session_mate || fail "main owns the mate's own session"
+  ! fm_jcode_owned_session "$main/state" session_crew || fail "main must refuse a session bound only in the mate's state"
+  fm_jcode_owned_session "$mate/state" session_crew || fail "the mate owns its crew"
+  ! fm_jcode_owned_session "$mate/state" session_mate || fail "the mate must not own the main-bound mate session"
+  pass "ownership: each home's guard sees only its own state; the main home refuses a mate's crew sessions"
+}
+
 test_secondmate_spawn_on_jcode
+test_two_homes_one_daemon_locks
+test_main_guard_refuses_mate_crew
 test_detection_is_anchored_and_markerless
 test_daemon_is_never_an_anchor_or_owner
 test_trusted_id_anchor_and_two_sessions
