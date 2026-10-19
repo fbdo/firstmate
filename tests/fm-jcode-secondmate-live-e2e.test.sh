@@ -150,8 +150,15 @@ note "step 3: the mate's lock anchors on its TUI client $CLIENT1 and session $SE
 if transcript_has "primary harness: jcode"; then note "step 3: the mate's session start reported primary harness: jcode"; fi
 
 # --- 4. delegated seatbelt --------------------------------------------------------------
-printf 'Run this exact command with your bash tool once and report what happened: bash %s/bin/fm-watch.sh' "$MATE" \
-  | node "$ROOT/bin/fm-jcode-api.mjs" send "$SESSION1" > /dev/null || fail "could not send the seatbelt probe"
+mate_idle() { case "$(fm_busy_record_read "$H/state" "$ID" 2>/dev/null)" in "idle "*) return 0 ;; esac; return 1; }
+wait_for "the mate's first turn to finish" mate_idle
+sent=0
+for _ in 1 2 3 4 5; do
+  if printf 'Run this exact command with your bash tool once and report what happened: bash %s/bin/fm-watch.sh' "$MATE" \
+    | node "$ROOT/bin/fm-jcode-api.mjs" send "$SESSION1" > /dev/null 2>&1; then sent=1; break; fi
+  sleep 3
+done
+[ "$sent" = 1 ] || fail "could not send the seatbelt probe"
 wait_for "the delegated seatbelt deny to reach the mate" transcript_has "[watcher-"
 note "step 4: the mate's own dispatcher denied a watcher run through its delegated pre_tool seatbelt"
 
