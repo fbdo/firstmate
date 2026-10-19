@@ -62,13 +62,52 @@
 //                                             non-attached session_status value
 //                                             (`running`, `idle`, ...).
 //
-// Exit codes: 0 success, 1 refused or not found, 2 usage, 3 transport failure.
+//   fm-jcode-api.mjs soft <session-id>        read text on stdin; submit it as a
+//                                             soft interrupt (client_id fm-<epoch>).
+//                                             Exit 0 once the daemon answers ok.
+//   fm-jcode-api.mjs history <session-id> [--lines N]
+//                                             print the transcript tail as plain
+//                                             text, one `[role] content` block per
+//                                             message (content cut to 2000 chars),
+//                                             then only the last N lines.
+//   fm-jcode-api.mjs exists <session-id>      attach: exit 0 attached, 1 unknown
+//                                             session, 4 daemon unavailable.
+//   fm-jcode-api.mjs status <session-id>      attach and print the session's own
+//                                             status (`running`, `idle`, or
+//                                             `unknown` when none is announced).
+//
+// Transport: by default the Phase 1 `jcode api-bridge --stdio` child. With
+// `--socket <path>` (or FM_JCODE_API_TRANSPORT=socket and JCODE_API_SOCKET) the
+// client dials that API socket directly, which never autostarts a daemon.
+//
+// Exit codes: 0 success, 1 refused or not found, 2 usage, 3 transport failure,
+// 4 daemon unavailable (the socket refused or is absent; socket transport only).
 // Every failure prints one line on stderr and never retries.
 import { spawn } from "node:child_process";
+import net from "node:net";
 
 const TIMEOUT_MS = Number(process.env.FM_JCODE_API_TIMEOUT_MS || 15000);
-const VERBS = ["create", "send", "remind", "cancel", "archive", "session-exists", "status"];
-const [verb, target, ...rest] = process.argv.slice(2);
+const VERBS = ["create", "send", "remind", "cancel", "archive", "session-exists", "soft", "history", "exists", "status"];
+let argv = process.argv.slice(2);
+let socketPath = "";
+{
+  const at = argv.indexOf("--socket");
+  if (at !== -1) {
+    socketPath = argv[at + 1] || "";
+    argv = [...argv.slice(0, at), ...argv.slice(at + 2)];
+    if (!socketPath) {
+      process.stderr.write("fm-jcode-api: --socket needs a path\n");
+      process.exit(2);
+    }
+  } else if (process.env.FM_JCODE_API_TRANSPORT === "socket") {
+    socketPath = process.env.JCODE_API_SOCKET || "";
+    if (!socketPath) {
+      process.stderr.write("fm-jcode-api: FM_JCODE_API_TRANSPORT=socket needs JCODE_API_SOCKET\n");
+      process.exit(2);
+    }
+  }
+}
+const [verb, target, ...rest] = argv;
 
 function usage(message) {
   process.stderr.write(
@@ -80,7 +119,7 @@ function usage(message) {
 if (!verb || !target) usage("missing arguments");
 if (!VERBS.includes(verb)) usage(`unknown verb ${verb}`);
 const options = {};
-const allowed = verb === "create" ? ["--model", "--effort", "--note"] : [];
+const allowed = verb === "create" ? ["--model", "--effort", "--note"] : verb === "history" ? ["--lines"] : [];
 for (let i = 0; i < rest.length; i += 2) {
   const key = rest[i];
   const value = rest[i + 1];
@@ -97,9 +136,30 @@ async function readStdin() {
 
 function openBridge() {
   const binary = process.env.FM_JCODE_BIN || "jcode";
-  const child = spawn(binary, ["--quiet", "--no-update", "api-bridge", "--stdio"], {
-    stdio: ["pipe", "pipe", "pipe"],
-  });
+  let child;
+  let unavailable = false;
+  if (socketPath) {
+    const sock = net.createConnection(socketPath);
+    const handlers = { error: [], close: [] };
+    child = {
+      stdout: sock,
+      stderr: { on() {} },
+      stdin: { write: (d) => sock.write(d), end: () => sock.end() },
+      kill: () => sock.destroy(),
+      on(name, fn) {
+        handlers[name]?.push(fn);
+      },
+    };
+    sock.on("error", (error) => {
+      if (error.code === "ECONNREFUSED" || error.code === "ENOENT") unavailable = true;
+      handlers.error.forEach((fn) => fn(error));
+    });
+    sock.on("close", () => handlers.close.forEach((fn) => fn()));
+  } else {
+    child = spawn(binary, ["--quiet", "--no-update", "api-bridge", "--stdio"], {
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+  }
   const frames = [];
   const waiters = [];
   let buffer = "";
@@ -170,12 +230,14 @@ function openBridge() {
       setTimeout(() => child.kill(), 200).unref();
     },
     lastStderr: () => stderr.trim().split("\n").pop() || "",
+    unavailable: () => unavailable,
   };
 }
 
 async function main() {
-  const text = verb === "remind" || verb === "send" ? await readStdin() : "";
-  if ((verb === "remind" || verb === "send") && !text) usage(`empty ${verb === "send" ? "message" : "reminder"} on stdin`);
+  const needsText = verb === "remind" || verb === "send" || verb === "soft";
+  const text = needsText ? await readStdin() : "";
+  if (needsText && !text) usage(`empty ${verb === "remind" ? "reminder" : "message"} on stdin`);
   const bridge = openBridge();
   const fail = (code, message) => {
     process.stderr.write(`fm-jcode-api: ${message}\n`);
@@ -189,7 +251,16 @@ async function main() {
     if (!reply) fail(3, `${what} timed out`);
     return reply;
   };
-  const hello = await request({ req: "hello", min_version: 1, max_version: 1, client: "firstmate" }, "handshake");
+  if (socketPath) {
+    const probe = bridge.send({ req: "hello", min_version: 1, max_version: 1, client: "firstmate" });
+    const first = await bridge.wait((f) => f.reply_to === probe);
+    if (!first && bridge.unavailable()) fail(4, `the jcode API socket ${socketPath} is unavailable`);
+    if (!first) fail(3, "handshake timed out");
+    if (first.ev !== "hello_ok") fail(3, `handshake refused: ${first.message || first.ev}`);
+  }
+  const hello = socketPath
+    ? { ev: "hello_ok" }
+    : await request({ req: "hello", min_version: 1, max_version: 1, client: "firstmate" }, "handshake");
   if (hello.ev !== "hello_ok") fail(3, `handshake refused: ${hello.message || hello.ev}`);
 
   if (verb === "session-exists") {
@@ -238,6 +309,10 @@ async function main() {
   }
 
   const attached = await request({ req: "attach_session", session_id: target }, "attach_session");
+  if (verb === "exists") {
+    bridge.close();
+    process.exit(attached.ev === "attached" ? 0 : 1);
+  }
   if (attached.ev !== "attached") fail(1, `attach_session refused: ${attached.message || attached.ev}`);
 
   if (verb === "status") {
@@ -247,6 +322,28 @@ async function main() {
     );
     if (!status) fail(3, "no session_status was reported");
     process.stdout.write(`${status.status}\n`);
+    bridge.close();
+    process.exit(0);
+  }
+
+  if (verb === "history") {
+    const reply = await request({ req: "get_history", session_id: target }, "get_history");
+    if (reply.ev !== "history") fail(1, `get_history refused: ${reply.message || reply.ev}`);
+    const blocks = (reply.messages || []).map((m) => {
+      const content = String(m.content ?? "");
+      return `[${m.role}] ${content.length > 2000 ? content.slice(0, 2000) + "..." : content}`;
+    });
+    let lines = blocks.join("\n").split("\n");
+    const limit = Number(options.lines || 0);
+    if (limit > 0) lines = lines.slice(-limit);
+    process.stdout.write(`${lines.join("\n")}\n`);
+    bridge.close();
+    process.exit(0);
+  }
+
+  if (verb === "soft") {
+    const reply = await request({ req: "soft_interrupt", session_id: target, content: text, client_id: `fm-${Date.now()}` }, "soft_interrupt");
+    if (reply.ev !== "ok") fail(1, `soft_interrupt refused: ${reply.message || reply.ev}`);
     bridge.close();
     process.exit(0);
   }
