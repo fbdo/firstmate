@@ -26,12 +26,58 @@
 #
 # Several homes on one machine each register their own dispatcher path; each
 # dispatcher acts only for sessions whose working directory is its own home.
+#
+# A secondmate home (marker .fm-secondmate-home) registers nothing of its own:
+# the parent home's dispatcher delegates to the mate's dispatcher. `status` there
+# reports registered when the parent's dispatcher is registered and the parent's
+# state/<id>.meta records this home as a kind=secondmate harness=jcode task;
+# `install` refuses with "register the parent home's hooks instead".
+#
+# `status` also prints one read-only line when config.toml enables [ambient]
+# (Firstmate does not use ambient mode); it never changes the exit status.
 set -u
 
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 HOOK="$SCRIPT_DIR/fm-jcode-hook.sh"
 CONFIG_FILE=${FM_JCODE_CONFIG:-${JCODE_HOME:-$HOME/.jcode}/config.toml}
 VERB=${1:-print}
+
+# Mate-home mode: resolve the parent's dispatcher and verify the parent binds us.
+ROOT=$(CDPATH='' cd -- "$SCRIPT_DIR/.." && pwd -P)
+if [ -f "$ROOT/.fm-secondmate-home" ] && [ ! -L "$ROOT/.fm-secondmate-home" ]; then
+  case "$VERB" in
+    status|install)
+      if [ "$VERB" = install ]; then
+        echo "error: this is a secondmate home; register the parent home's hooks instead" >&2
+        exit 1
+      fi
+      MATE_ID=''
+      IFS= read -r MATE_ID <"$ROOT/.fm-secondmate-home" || true
+      MATE_ID=${MATE_ID//[[:space:]]/}
+      PARENT_HOME=''
+      route=''
+      while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in
+          route=*) route=${line#route=} ;;
+          parent_home=*) PARENT_HOME=${line#parent_home=} ;;
+        esac
+      done <"$ROOT/.fm-secondmate-parent" 2>/dev/null
+      if [ "$route" != local ] || [ ! -f "$PARENT_HOME/bin/fm-jcode-hook.sh" ]; then
+        echo "jcode hooks: NOT registered (no usable local parent home recorded in .fm-secondmate-parent)"
+        exit 1
+      fi
+      PMETA="$PARENT_HOME/state/$MATE_ID.meta"
+      pm() { awk -F= -v k="$1" '$1 == k { v = substr($0, index($0, "=") + 1) } END { print v }' "$PMETA" 2>/dev/null; }
+      pm_home=$(pm home)
+      if [ "$(pm kind)" != secondmate ] || [ "$(pm harness)" != jcode ] || [ -z "$pm_home" ] \
+        || [ "$(CDPATH='' cd -- "$pm_home" 2>/dev/null && pwd -P)" != "$ROOT" ]; then
+        echo "jcode hooks: NOT registered (the parent home does not record this home as a jcode secondmate)"
+        exit 1
+      fi
+      HOOK="$PARENT_HOME/bin/fm-jcode-hook.sh"
+      ;;
+  esac
+fi
 
 toml_string() {  # <value>
   printf '"%s"' "$(printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')"
@@ -73,8 +119,14 @@ if verb == "status":
     missing = [k for k in keys if not registered(k)]
     if missing:
         print(f"jcode hooks: NOT registered for this home ({', '.join(missing)} missing in {path})")
+        amb = data.get("ambient", {})
+        if isinstance(amb, dict) and amb.get("enabled") is True:
+            print("jcode ambient: enabled (Firstmate does not use it; workers on this daemon may receive ambient turns)")
         sys.exit(1)
     print(f"jcode hooks: registered for this home in {path}")
+    amb = data.get("ambient", {})
+    if isinstance(amb, dict) and amb.get("enabled") is True:
+        print("jcode ambient: enabled (Firstmate does not use it; workers on this daemon may receive ambient turns)")
     sys.exit(0)
 def q(s): return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
 def render(key):
@@ -124,7 +176,7 @@ print(f"jcode hooks: registered {', '.join(todo)} for this home in {path}")
 PY
     ;;
   -h|--help)
-    sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,36p' "$0" | sed 's/^# \{0,1\}//'
     ;;
   *)
     echo "usage: fm-jcode-setup.sh [print|env|status|install]" >&2

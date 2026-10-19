@@ -312,3 +312,63 @@ fm_jcode_report_blocked() {  # <state-dir> <id> <reason>
   case "$last" in *"$3"*) return 1 ;; esac
   printf 'blocked [at=%s]: %s\n' "$(date +%s)" "$3" >> "$f"
 }
+
+# Refuse a shared daemon whose own environment carries Firstmate home
+# selection. Every jcode tool shell is a child of the daemon, so an FM_HOME (or
+# an *_OVERRIDE) in the daemon environment would silently point a secondmate's
+# tools at the wrong home. The environ comes from FM_JCODE_DAEMON_ENVIRON_FILE
+# (test seam) or /proc/<pid>/environ of the `jcode serve --socket <socket>`
+# process. Exit 0 clean or unreadable (one warning), exit 1 with the refusal.
+fm_jcode_daemon_env_clean() {
+  local file=${FM_JCODE_DAEMON_ENVIRON_FILE:-} pid names name bad=''
+  if [ -z "$file" ]; then
+    pid=$(pgrep -f "jcode serve --socket ${JCODE_SOCKET:-}" 2>/dev/null | head -n 1) || pid=''
+    [ -z "$pid" ] || file=/proc/$pid/environ
+  fi
+  if [ -z "$file" ] || [ ! -r "$file" ]; then
+    echo "warning: cannot read the shared jcode daemon environment; not checking it for FM_HOME" >&2
+    return 0
+  fi
+  names=$(tr '\0' '\n' <"$file" 2>/dev/null | sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p') || names=''
+  for name in FM_HOME FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_CONFIG_OVERRIDE FM_ROOT_OVERRIDE; do
+    if printf '%s\n' "$names" | grep -qx "$name"; then
+      bad="${bad:+$bad, }$name"
+    fi
+  done
+  [ -z "$bad" ] || {
+    echo "error: the shared jcode daemon carries $bad in its environment; restart it from a clean shell" >&2
+    return 1
+  }
+  return 0
+}
+
+# Print the secondmate home whose own hook dispatcher must handle a jcode hook
+# event, or return 1. A home qualifies when <state>/*.meta records it with
+# kind=secondmate and harness=jcode, its .fm-secondmate-home marker names the
+# same task id, it ships bin/fm-jcode-hook.sh as a regular file, and either the
+# session's toplevel is that home or the session is bound in that home's state.
+fm_jcode_secondmate_hook_target() {  # <state-dir> <toplevel> <session>
+  local state=$1 top=$2 session=$3 meta id home real marker mid=''
+  for meta in "$state"/*.meta; do
+    [ -f "$meta" ] || continue
+    [ "$(fm_jcode_meta_value "$meta" kind)" = secondmate ] || continue
+    [ "$(fm_jcode_meta_value "$meta" harness)" = jcode ] || continue
+    id=${meta##*/}
+    id=${id%.meta}
+    home=$(fm_jcode_meta_value "$meta" home)
+    [ -n "$home" ] && [ -d "$home" ] || continue
+    real=$(CDPATH='' cd -- "$home" 2>/dev/null && pwd -P) || continue
+    marker="$real/.fm-secondmate-home"
+    [ -f "$marker" ] && [ ! -L "$marker" ] || continue
+    mid=''
+    IFS= read -r mid <"$marker" 2>/dev/null || [ -n "$mid" ] || continue
+    mid=${mid//[[:space:]]/}
+    [ "$mid" = "$id" ] || continue
+    [ -f "$real/bin/fm-jcode-hook.sh" ] && [ ! -L "$real/bin/fm-jcode-hook.sh" ] || continue
+    if [ "$top" = "$real" ] || fm_jcode_session_task "$real/state" "$session" >/dev/null 2>&1; then
+      printf '%s\n' "$real"
+      return 0
+    fi
+  done
+  return 1
+}

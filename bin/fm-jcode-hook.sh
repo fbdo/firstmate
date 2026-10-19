@@ -14,10 +14,19 @@
 #   - this home's own primary: the working directory resolves to this script's
 #     own firstmate checkout, and that checkout is a genuine primary home
 #     (fm_primary_scope_matches).
-# Every other session - another home's worker, a secondmate home that
-# registers its own copy, an unrelated repo - is a silent exit 0 that costs
-# one git call. It never executes code from the session's repository; each
-# home registers its own copy of this script.
+#   - a jcode secondmate of this home (state/<id>.jcode-session with
+#     kind=secondmate in its meta): busy/idle are recorded without the
+#     turn-ended notification, the worker subagent fence does not apply, and
+#     the event is then delegated (below).
+# Every other session - another home's worker, an unrelated repo - is a silent
+# exit 0 that costs one git call. It never executes code from the session's
+# repository, with one exception: a registered secondmate home's own
+# dispatcher. The machine-global [hooks] names only this home's copy, so for a
+# jcode secondmate recorded in this home's state/*.meta (kind=secondmate,
+# harness=jcode, marker id equal to the task id) the event for the mate's own
+# session, or for a session bound in the mate's state/, is handed to the mate's
+# own bin/fm-jcode-hook.sh (exec, FM_JCODE_HOOK_DELEGATED=1, one level only),
+# which applies its own scoping, seatbelts, and turn-end backstop.
 #
 # Events (JCODE_HOOK_EVENT):
 #   turn_start OBSERVER. For a bound worker, records busy through
@@ -70,6 +79,17 @@ TOPLEVEL=$(CDPATH='' cd -- "$TOPLEVEL" 2>/dev/null && pwd -P) || exit 0
 export FM_HOME=${FM_HOME:-$FM_ROOT}
 STATE=${FM_STATE_OVERRIDE:-$FM_HOME/state}
 
+# Hand the event to a registered secondmate home's own dispatcher when this
+# session is that mate or one of its crew. Returns when nothing matches.
+delegate_to_secondmate() {
+  local target
+  [ "${FM_JCODE_HOOK_DELEGATED:-}" != 1 ] || return 0
+  [ -d "$STATE" ] || return 0
+  target=$(fm_jcode_secondmate_hook_target "$STATE" "$TOPLEVEL" "$SESSION") || return 0
+  exec env FM_JCODE_HOOK_DELEGATED=1 FM_HOME="$target" FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= \
+    "$target/bin/fm-jcode-hook.sh"
+}
+
 # --- scope: a jcode worker of this home ---------------------------------------
 if [ -d "$STATE" ]; then
   # shellcheck source=bin/fm-jcode-lib.sh
@@ -80,6 +100,20 @@ $BOUND
 EOF
     TASK_WT=$(CDPATH='' cd -- "$TASK_WT" 2>/dev/null && pwd -P) || exit 0
     [ "$TOPLEVEL" = "$TASK_WT" ] || exit 0
+    if [ "$(fm_jcode_meta_value "$STATE/$TASK_ID.meta" kind)" = secondmate ]; then
+      # A secondmate is a primary: busy/idle without the turn-ended notification
+      # (it sets busy_notify_turnend=false), no worker fence, then delegation.
+      case "$EVENT" in
+        turn_start)
+          "$SCRIPT_DIR/fm-busy-event.sh" apply "$STATE" "$TASK_ID" busy --gen "$TASK_GEN" \
+            --source jcode-hook --event turn-start >/dev/null 2>&1 || true ;;
+        turn_end)
+          "$SCRIPT_DIR/fm-busy-event.sh" apply "$STATE" "$TASK_ID" idle --gen "$TASK_GEN" \
+            --source jcode-hook --event turn-end >/dev/null 2>&1 || true ;;
+      esac
+      delegate_to_secondmate
+      exit 0
+    fi
     if [ "$EVENT" = pre_tool ]; then
       # Worker fence (amended D12): subagents stay inside the worker's own swarm.
       # Only the swarm tool (and swarm calls inside batch) is examined, and the
@@ -139,6 +173,7 @@ EOF
     exit 0
   fi
 fi
+delegate_to_secondmate
 [ "$EVENT" != turn_start ] || exit 0
 
 # --- scope: this home's own primary session only ------------------------------
