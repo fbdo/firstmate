@@ -2797,6 +2797,9 @@ if [ "$BACKEND" = jcode ]; then
     echo "error: this home's jcode hooks are not registered (bin/fm-jcode-setup.sh status); the worker fence needs them" >&2
     exit 1
   }
+  # The keeper, bridge, and every native API helper resolve this home from
+  # FM_HOME, which the default-home path above only sets as a shell variable.
+  export FM_HOME
   fm_backend_jcode_runtime_check || exit 1
   eval "$("$SCRIPT_DIR/fm-jcode-keeper.sh" env)"
   export JCODE_SOCKET JCODE_API_SOCKET

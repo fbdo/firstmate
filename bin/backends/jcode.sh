@@ -39,7 +39,7 @@ fm_backend_jcode_tool_check() {
 # The bridge and keeper must be up and the shared daemon reachable. Never starts the daemon.
 fm_backend_jcode_runtime_check() {
   fm_backend_jcode_tool_check || return 1
-  "$_FM_BACKEND_JCODE_DIR/fm-jcode-keeper.sh" ensure >/dev/null
+  FM_HOME=${FM_HOME:-} "$_FM_BACKEND_JCODE_DIR/fm-jcode-keeper.sh" ensure >/dev/null
 }
 
 # <target> -> the bare session id, or return 1.

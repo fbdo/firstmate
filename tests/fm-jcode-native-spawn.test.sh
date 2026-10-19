@@ -68,7 +68,12 @@ run_spawn() {  # <case> <id> [spawn args...]
 $1
 EOF
   shift 2
-  env "${SCRUB[@]}" HOME="$home" FM_HOME="$home" FM_ROOT_OVERRIDE='' \
+  local home_env=(FM_HOME="$home" FM_ROOT_OVERRIDE='')
+  # SPAWN_DEFAULT_HOME=1 leaves FM_HOME unset and selects the home the way an
+  # operator's plain `bin/fm-spawn.sh` does (FM_ROOT_OVERRIDE stands in for the
+  # script's own checkout).
+  [ -z "${SPAWN_DEFAULT_HOME:-}" ] || { home_env=(FM_ROOT_OVERRIDE="$home"); [ -e "$home/bin" ] || { ln -s "$ROOT/bin" "$home/bin"; git -C "$home" init -q && git -C "$home" -c user.name=t -c user.email=t@t commit -q --allow-empty -m root; }; }
+  env "${SCRUB[@]}" HOME="$home" "${home_env[@]}" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 XDG_RUNTIME_DIR="$XDG" JCODE_SOCKET="$DSOCK" FM_JCODE_CONFIG="${SPAWN_HOOKCFG:-$HOOKCFG}" \
@@ -175,7 +180,20 @@ EOF
   pass "a keeper attach timeout archives the session and sends no brief"
 }
 
+test_native_spawn_default_home() {
+  local rec dir home proj wt fb id=nsp9 out rc
+  rec=$(make_case defhome "$id")
+  IFS='|' read -r dir home proj wt fb <<EOF
+$rec
+EOF
+  out=$(SPAWN_DEFAULT_HOME=1 run_spawn "$rec" "$id" --backend jcode --model m1); rc=$?
+  [ "$rc" -eq 0 ] || fail "a native spawn with FM_HOME unset must reach the keeper with the resolved home (rc=$rc): $out"
+  assert_not_contains "$out" "FM_HOME must name" "the keeper must receive the resolved home"
+  pass "native spawn with FM_HOME unset exports the resolved home to the keeper"
+}
+
 test_native_spawn
+test_native_spawn_default_home
 test_refusals
 test_keeper_timeout_aborts
 

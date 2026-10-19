@@ -2739,7 +2739,7 @@ jcode_keeper_health() {
     rm -f "$marker"
     return 0
   fi
-  if out=$(timeout 30 "$SCRIPT_DIR/fm-jcode-keeper.sh" ensure 2>&1); then
+  if out=$(FM_HOME=$FM_HOME timeout 30 "$SCRIPT_DIR/fm-jcode-keeper.sh" ensure 2>&1); then
     rm -f "$marker"
     triage_log "jcode keeper restarted by the watcher"
     return 0

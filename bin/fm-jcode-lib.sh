@@ -163,7 +163,7 @@ fm_jcode_native_api() {  # <meta> <verb...>
   [ -n "$sock" ] || { echo "error: no jcode_api_socket recorded in $meta" >&2; return 3; }
   fm_jcode_with_meta_env "$meta" node "$_FM_JCODE_LIB_DIR/fm-jcode-api.mjs" --socket "$sock" "$@" || rc=$?
   if [ "$rc" -eq 4 ]; then
-    "$_FM_JCODE_LIB_DIR/fm-jcode-keeper.sh" ensure >/dev/null 2>&1 || return 4
+    FM_HOME=${FM_HOME:-} "$_FM_JCODE_LIB_DIR/fm-jcode-keeper.sh" ensure >/dev/null 2>&1 || return 4
     rc=0
     fm_jcode_with_meta_env "$meta" node "$_FM_JCODE_LIB_DIR/fm-jcode-api.mjs" --socket "$sock" "$@" || rc=$?
   fi
