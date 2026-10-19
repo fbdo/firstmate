@@ -208,6 +208,11 @@ printf 'window=jcode:%s\nbackend=jcode\nharness=jcode\nworktree=%s\njcode_sessio
 VCLIENT=
 for _ in $(seq 1 60); do VCLIENT=$(fm_jcode_client_pid "$VSID" "$JH") && break; sleep 0.5; done
 [ -n "$VCLIENT" ] || fail "no client attached through the viewer pane"
+# P5-B1 build check: with a TUI client holding the session, memory off set over one
+# API connection still reads off from a second one after the first has closed.
+node "$ROOT/bin/fm-jcode-api.mjs" runtime "$VSID" memory off > /dev/null 2>&1 || fail "memory off was refused"
+mem=$(node "$ROOT/bin/fm-jcode-api.mjs" runtime "$VSID" memory status 2>/dev/null) || mem=
+case "$mem" in *'"enabled":false'*) note "pane memory: off persists across API connections while the TUI client holds the session" ;; *) fail "pane memory off did not persist (got '$mem')" ;; esac
 "$H/bin/fm-jcode-viewer.sh" close vw || fail "viewer close failed"
 for _ in $(seq 1 40); do kill -0 "$VCLIENT" 2>/dev/null || break; sleep 0.25; done
 kill -0 "$VCLIENT" 2>/dev/null && fail "the viewer client survived its close"
