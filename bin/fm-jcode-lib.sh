@@ -80,6 +80,13 @@ fm_jcode_api() {  # <verb> <args...>
 # records: one `jcode_home=`, `jcode_runtime_dir=`, or `jcode_socket=` line
 # for each of JCODE_HOME, JCODE_RUNTIME_DIR, and JCODE_SOCKET that is set.
 fm_jcode_daemon_meta_lines() {
+  # Native (backend=jcode) tasks run on the shared daemon: no private home or
+  # runtime dir is recorded, only the shared socket and this home's API socket.
+  if [ "${FM_JCODE_NATIVE:-}" = 1 ]; then
+    [ -z "${JCODE_SOCKET:-}" ] || printf 'jcode_socket=%s\n' "$JCODE_SOCKET"
+    [ -z "${JCODE_API_SOCKET:-}" ] || printf 'jcode_api_socket=%s\n' "$JCODE_API_SOCKET"
+    return 0
+  fi
   [ -z "${JCODE_HOME:-}" ] || printf 'jcode_home=%s\n' "$JCODE_HOME"
   [ -z "${JCODE_RUNTIME_DIR:-}" ] || printf 'jcode_runtime_dir=%s\n' "$JCODE_RUNTIME_DIR"
   [ -z "${JCODE_SOCKET:-}" ] || printf 'jcode_socket=%s\n' "$JCODE_SOCKET"
@@ -113,13 +120,54 @@ fm_jcode_meta_home() {  # <meta>
 # variables are cleared and only the recorded ones set, so the ambient
 # environment can never redirect a task's API call to another daemon.
 fm_jcode_with_meta_env() {  # <meta> <command> [args...]
-  local meta=$1 home runtime socket
+  local meta=$1 home runtime socket api_socket
   shift
   home=$(fm_jcode_meta_value "$meta" jcode_home)
   runtime=$(fm_jcode_meta_value "$meta" jcode_runtime_dir)
   socket=$(fm_jcode_meta_value "$meta" jcode_socket)
-  env -u JCODE_HOME -u JCODE_RUNTIME_DIR -u JCODE_SOCKET \
-    ${home:+JCODE_HOME="$home"} ${runtime:+JCODE_RUNTIME_DIR="$runtime"} ${socket:+JCODE_SOCKET="$socket"} "$@"
+  api_socket=$(fm_jcode_meta_value "$meta" jcode_api_socket)
+  env -u JCODE_HOME -u JCODE_RUNTIME_DIR -u JCODE_SOCKET -u JCODE_API_SOCKET \
+    ${home:+JCODE_HOME="$home"} ${runtime:+JCODE_RUNTIME_DIR="$runtime"} ${socket:+JCODE_SOCKET="$socket"} \
+    ${api_socket:+JCODE_API_SOCKET="$api_socket"} "$@"
+}
+
+# The ownership guard (amended D11). True only for a session this home owns: one
+# recorded in <state>/*.jcode-session, or listed in a <state>/*.jcode-children
+# record of a bound task. Every mutating native call (send, soft, remind,
+# cancel, archive, rename, runtime) goes through it, so Firstmate can never act
+# on the captain's own sessions on the shared daemon.
+fm_jcode_owned_session() {  # <state-dir> <session>
+  local dir=$1 session=$2 f line
+  case "$session" in ''|*[!A-Za-z0-9_.-]*) return 1 ;; esac
+  for f in "$dir"/*.jcode-session; do
+    [ -f "$f" ] || continue
+    while IFS= read -r line || [ -n "$line" ]; do
+      [ "$line" = "session=$session" ] && return 0
+    done <"$f"
+  done
+  for f in "$dir"/*.jcode-children; do
+    [ -f "$f" ] || continue
+    while IFS= read -r line || [ -n "$line" ]; do
+      [ "${line%%$'\t'*}" = "$session" ] && return 0
+    done <"$f"
+  done
+  return 1
+}
+
+# Run bin/fm-jcode-api.mjs over a task's own API socket (native backend). Exit 4
+# (daemon or bridge unavailable) runs `fm-jcode-keeper.sh ensure` once and retries.
+fm_jcode_native_api() {  # <meta> <verb...>
+  local meta=$1 rc=0 sock
+  shift
+  sock=$(fm_jcode_meta_value "$meta" jcode_api_socket)
+  [ -n "$sock" ] || { echo "error: no jcode_api_socket recorded in $meta" >&2; return 3; }
+  fm_jcode_with_meta_env "$meta" node "$_FM_JCODE_LIB_DIR/fm-jcode-api.mjs" --socket "$sock" "$@" || rc=$?
+  if [ "$rc" -eq 4 ]; then
+    "$_FM_JCODE_LIB_DIR/fm-jcode-keeper.sh" ensure >/dev/null 2>&1 || return 4
+    rc=0
+    fm_jcode_with_meta_env "$meta" node "$_FM_JCODE_LIB_DIR/fm-jcode-api.mjs" --socket "$sock" "$@" || rc=$?
+  fi
+  return "$rc"
 }
 
 # The firstmate-owned record binding a task to its jcode session, read by the

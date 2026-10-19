@@ -67,8 +67,10 @@ FM_BACKEND_CONFIG_DIR="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 # cmux is EXPERIMENTAL and spawn-capable, session-provider-only like
 # herdr/zellij - verified against the real 0.64.17 binary (docs/cmux-backend.md).
 # codex-app remains deliberately absent; see docs/codex-app-backend.md.
-FM_BACKEND_KNOWN="tmux herdr zellij orca cmux"
-FM_BACKEND_SPAWN="tmux herdr zellij orca cmux"
+# jcode is the native jcode runtime (no pane; shared daemon, harness API); it
+# runs only the jcode harness and is never auto-detected (docs/jcode-backend.md).
+FM_BACKEND_KNOWN="tmux herdr zellij orca cmux jcode"
+FM_BACKEND_SPAWN="tmux herdr zellij orca cmux jcode"
 
 # fm_backend_list_contains: whitespace-delimited membership without relying on
 # shell word splitting. fm-backend.sh is normally sourced by bash scripts, but
@@ -312,6 +314,7 @@ fm_backend_required_tools() {  # <backend>
     zellij) printf '%s' 'zellij jq treehouse' ;;
     cmux)   printf '%s' 'cmux jq treehouse' ;;
     orca)   printf '%s' 'orca' ;;
+    jcode)  printf '%s' 'jcode node treehouse' ;;
     *) return 1 ;;
   esac
 }
@@ -530,6 +533,21 @@ fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
       fi
       window=$terminal
       ;;
+    jcode)
+      [ "$binding" = "$id" ] || {
+        echo "REFUSED: jcode endpoint metadata for task $id lacks an exact task binding; preserving task state." >&2
+        return 1
+      }
+      recorded_session=$(fm_backend_meta_exact_value "$meta" jcode_session) || recorded_session=
+      surface=$(fm_backend_meta_exact_value "$meta" jcode_api_socket) || surface=
+      workspace=$(fm_backend_meta_exact_value "$meta" jcode_socket) || workspace=
+      if [ -z "$recorded_session" ] || [ -z "$surface" ] || [ -z "$workspace" ] \
+        || [ "$window" != "jcode:$recorded_session" ] \
+        || ! fm_backend_endpoint_atom_valid "$recorded_session"; then
+        echo "REFUSED: jcode endpoint metadata for task $id is malformed or inconsistent; preserving task state." >&2
+        return 1
+      fi
+      ;;
     cmux)
       [ "$binding" = "$id" ] || {
         echo "REFUSED: legacy cmux endpoint metadata for task $id lacks an exact task binding; preserving task state." >&2
@@ -643,6 +661,9 @@ fm_backend_source() {  # <name>
     cmux)
       set -- fm-backend-hometag-lib.sh fm-composer-lib.sh
       ;;
+    jcode)
+      set -- fm-jcode-lib.sh fm-transition-lib.sh fm-composer-lib.sh
+      ;;
     *)
       return 1
       ;;
@@ -686,6 +707,13 @@ fm_backend_source() {  # <name>
         # shellcheck source=/dev/null
         . "$adapter" || return 1
         _FM_BACKEND_CMUX_SOURCED=1
+      fi
+      ;;
+    jcode)
+      if [ -z "${_FM_BACKEND_JCODE_SOURCED:-}" ]; then
+        # shellcheck source=/dev/null
+        . "$adapter" || return 1
+        _FM_BACKEND_JCODE_SOURCED=1
       fi
       ;;
   esac
@@ -759,6 +787,7 @@ fm_backend_capture() {  # <backend> <target> <lines> [expected-label]
     zellij) fm_backend_zellij_capture "$@" ;;
     orca) fm_backend_orca_capture "$@" ;;
     cmux) fm_backend_cmux_capture "$@" ;;
+    jcode) fm_backend_jcode_capture "$@" ;;
     *) echo "error: no capture implementation for backend '$backend'" >&2; return 1 ;;
   esac
 }
@@ -804,6 +833,7 @@ fm_backend_send_key() {  # <backend> <target> <key> [expected-label]
     zellij) fm_backend_zellij_send_key "$@" ;;
     orca) fm_backend_orca_send_key "$@" ;;
     cmux) fm_backend_cmux_send_key "$@" ;;
+    jcode) fm_backend_jcode_send_key "$@" ;;
     *) echo "error: no send-key implementation for backend '$backend'" >&2; return 1 ;;
   esac
 }
@@ -844,6 +874,7 @@ fm_backend_send_text_submit() {  # <backend> <target> <text> <retries> <enter-sl
     zellij) fm_backend_zellij_send_text_submit "$@" || rc=$? ;;
     orca) fm_backend_orca_send_text_submit "$@" || rc=$? ;;
     cmux) fm_backend_cmux_send_text_submit "$@" || rc=$? ;;
+    jcode) fm_backend_jcode_send_text_submit "$@" || rc=$? ;;
     *) echo "error: no send-text implementation for backend '$backend'" >&2; rc=1 ;;
   esac
   fm_composer_dialog_sink_release
@@ -873,6 +904,7 @@ fm_backend_kill() {  # <backend> <target>
     zellij) fm_backend_zellij_kill "$@" ;;
     orca) fm_backend_orca_kill "$@" ;;
     cmux) fm_backend_cmux_kill "$@" ;;
+    jcode) fm_backend_jcode_kill "$@" ;;
     *) echo "error: no kill implementation for backend '$backend'" >&2; return 1 ;;
   esac
 }
@@ -910,6 +942,7 @@ fm_backend_busy_state() {  # <backend> <target>
   fm_backend_source "$backend" || { printf 'unknown'; return 0; }
   case "$backend" in
     herdr) fm_backend_herdr_busy_state "$@" ;;
+    jcode) fm_backend_jcode_busy_state "$@" ;;
     *) printf 'unknown' ;;
   esac
 }
@@ -935,6 +968,7 @@ fm_backend_composer_state() {  # <backend> <target> [expected-label] -> empty|pe
     herdr) fm_backend_herdr_composer_state "$@" ;;
     orca) fm_backend_orca_composer_state "$@" ;;
     cmux) fm_backend_cmux_composer_state "$@" ;;
+    jcode) fm_backend_jcode_composer_state "$@" ;;
     zellij) fm_backend_zellij_composer_state "$@" ;;
     *) printf 'unknown' ;;
   esac
@@ -989,6 +1023,10 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
       fm_backend_source cmux || return 1
       fm_backend_cmux_target_ready "$target" "$expected_label"
       ;;
+    jcode)
+      fm_backend_source jcode || return 1
+      fm_backend_jcode_target_exists "$target"
+      ;;
     *)
       return 1
       ;;
@@ -1021,6 +1059,7 @@ fm_backend_agent_state() {  # <backend> <target>
   case "$backend" in
     tmux) fm_backend_tmux_agent_state "$target" ;;
     herdr) fm_backend_herdr_agent_state "$target" ;;
+    jcode) fm_backend_jcode_agent_state "$target" ;;
     *) printf 'unverified' ;;
   esac
 }
@@ -1051,7 +1090,7 @@ fm_backend_agent_alive() {  # <backend> <target>
 # fm_backend_has_push: 0 if <backend> exposes a native transition push stream.
 fm_backend_has_push() {  # <backend>
   case "$1" in
-    herdr) return 0 ;;
+    herdr|jcode) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -1067,6 +1106,7 @@ fm_backend_events_capable() {  # <backend> <session>
   fm_backend_source "$backend" || return 1
   case "$backend" in
     herdr) fm_backend_herdr_events_capable "$@" ;;
+    jcode) fm_backend_jcode_events_capable "$@" ;;
     *) return 1 ;;
   esac
 }
@@ -1084,6 +1124,7 @@ fm_backend_wait_transition() {  # <backend> <session> <timeout_secs> <state_dir>
   fm_backend_source "$backend" || return 2
   case "$backend" in
     herdr) fm_backend_herdr_wait_transition "$@" ;;
+    jcode) fm_backend_jcode_wait_transition "$@" ;;
     *) return 2 ;;
   esac
 }
@@ -1095,6 +1136,7 @@ fm_backend_commit_transition() {  # <backend> <state_dir> <session> <record>
   fm_backend_source "$backend" || return 1
   case "$backend" in
     herdr) fm_backend_herdr_commit_transition "$@" ;;
+    jcode) fm_backend_jcode_commit_transition "$@" ;;
     *) return 1 ;;
   esac
 }
@@ -1106,6 +1148,7 @@ fm_backend_clear_transition() {  # <backend> <state_dir> <window>
   fm_backend_source "$backend" || return 1
   case "$backend" in
     herdr) fm_backend_herdr_clear_transition "$@" ;;
+    jcode) fm_backend_jcode_clear_transition "$@" ;;
     *) return 0 ;;
   esac
 }
