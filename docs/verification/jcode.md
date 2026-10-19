@@ -57,3 +57,20 @@ These were observed against private daemons on the same version while the launch
 Observed passing: real `fm-spawn.sh` on `backend=jcode` (lease, explicit model, title, keeper attach, memory off, brief), keeper-recorded brief turn, `fm-send` steer injected and recorded in `injected/`, `fm-control interrupt` (`cancel=cancelled`), keeper restart through `ensure` after the keeper was killed mid-turn, bridge kill restored by `ensure`, the teardown kill arm archiving the worker, and `keeper stop` leaving no lab process.
 
 Not proven live: (1) the crash-recovery re-prompt did not fire in the live run (marker absent): the turn had already ended or the daemon retained it while the keeper was down, so the one-shot re-prompt is proven only against the fake daemon; (2) the worker did not choose to start a subagent in the allotted time, so the live child record and child archive are proven only portably. A first run failed because `exists` counted an archived session as present; the adapter now uses `session-exists`, which ignores archived sessions.
+
+## Secondmate on jcode (pane client, delegated hooks), 2026-10-19
+
+`FM_JCODE_SECONDMATE_LIVE=1 tests/fm-jcode-secondmate-live-e2e.test.sh`, jcode v0.99.0 (774613c90), a private test daemon (credentials linked, hooks from `bin/fm-jcode-setup.sh env` naming only the lab main home's dispatcher), an isolated Herdr lab session through `bin/fm-herdr-lab.sh`, model `claude-sonnet-5-5`, effort low, a seeded project-less lab secondmate. The operational design stays one shared daemon; the private daemon exists only because the captain's global `[hooks]` cannot name a lab home.
+
+- ok - the mate session's working directory is the mate home, its title is `fm:<id>`, a TUI client is attached, and the parent's busy record advanced through the jcode hook.
+- ok - the mate's own `state/.lock` names its TUI client pid and session id.
+- ok - a bare watcher run in the mate was denied by the mate's own dispatcher (`[watcher-nested]`), reached by the parent's delegation.
+- ok - a marked request through `fm-send` produced a correlated reply on the parent channel and the pending-reply record resolved.
+- ok - after the mate's client was killed, the liveness probe and relaunch bound a fresh session with a new client, the old session was archived, and the relaunch ledger recorded `relaunched`.
+- ok - a native worker's viewer (`bin/fm-jcode-viewer.sh`) attached a real client to a session, closing it detached that client, and the session stayed up.
+- ok - pane worker memory: `runtime memory off` set over one API connection still read `enabled:false` from a second connection while a TUI client held the session, so the pane half of `config/jcode-worker-memory` is kept.
+
+Found by the run and fixed: the secondmate liveness probe did not list `jcode` as a recoverable harness, so a dead mate pane was reported "unverified for recovery".
+
+Not proven live: survival of a mate's background wake across a long idle, a shared-daemon reload during a mate turn, and the doorbell-into-the-mate wake loop beyond the correlated-reply case.
+

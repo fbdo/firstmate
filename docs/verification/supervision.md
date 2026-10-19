@@ -550,6 +550,8 @@ Hooks were registered through the daemon environment (`JCODE_HOOK_PRE_TOOL`, `JC
 The lock was then exercised from the live jcode session that wrote this record, in a disposable lab home from `bin/fm-lab-home.sh`: `bin/fm-lock.sh` recorded the TUI client pid and the session id, a repeat acquisition reconfirmed it, the id of a different live session on the same daemon was refused as another live owner, an absent id was refused with the jcode-specific reason, and `bin/fm-session-start.sh` rendered the `jcode` supervision block.
 `tests/fm-jcode-harness.test.sh` is the portable regression for the same contracts.
 
+A jcode secondmate home was then verified beside the main home under one daemon on 2026-10-19: each home's lock named its own TUI client and session, and the parent's hook dispatcher delegated the mate's events to the mate's own copy (`docs/verification/jcode.md` "Secondmate on jcode").
+
 The primary path was then accepted in a real interactive jcode TUI on a private daemon, in a plain clone of the branch, with the hooks passed through the daemon environment as `bin/fm-jcode-setup.sh env` prints them:
 
 | Requirement | Observed in the TUI session's persisted transcript and home |
