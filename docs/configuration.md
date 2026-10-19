@@ -13,7 +13,7 @@ Start with the directory layout, then use the setting reference for the behavior
 | Backlog, preferences, and memory | [Backlog backend](#backlog-backend-taskstoml--configbacklog-backend), [captain preferences](#captain-preferences-datacaptainmd--datacaptain-sharedmd), [external memory tiers](#external-memory-tiers-memory-layering-section), and [startup memory budget](#startup-memory-budget-configstartup-memory-budget) |
 | Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), and [Calm preference](#calm-preference-configcalm) |
 | Persistent secondmates | [Secondmate routes](#secondmate-routes-datasecondmatesmd) |
-| Per-run overrides and tuning | [Environment variables](#environment-variables) |
+| Per-run overrides and tuning | [Environment variables](#environment-variables) and [memory headroom](#memory-headroom-configmem-headroom-mib--fm_mem_headroom_mib) |
 
 ## FM_HOME
 
@@ -1237,6 +1237,18 @@ When every place is held, `bin/fm-spawn.sh` launches nothing, creates no record,
 A malformed or unreadable file refuses every fresh ship or scout spawn until it is fixed, rather than guessing the intended limit, and so does a local home's state directory or task record that cannot be read while counting a capped project's holders.
 Firstmate cannot see which part of a worker's life uses the resource, so the number bounds whole workers from launch to handoff, and the tightest resource every worker needs should decide it.
 [`bin/fm-project-capacity-lib.sh`](../bin/fm-project-capacity-lib.sh) owns the file format, what holds a place, and why concurrent spawns cannot both take the last one.
+
+## Memory headroom (config/mem-headroom-mib / FM_MEM_HEADROOM_MIB)
+
+Before heavy work Firstmate checks that this host still has free memory, so a worker launch, a lint run, or a concurrent test batch cannot push a small host into the out-of-memory killer.
+Headroom is the kernel's available memory plus free swap, and the threshold defaults to 1536 MiB, about what one source-following ShellCheck of the largest script needs.
+Set `FM_MEM_HEADROOM_MIB`, or write a whole number of MiB as the first line of the optional local, gitignored `config/mem-headroom-mib`, to change it.
+The variable wins over the file, and `0` turns the check off.
+When headroom is below the threshold, `bin/fm-spawn.sh` defers a fresh ship or scout exactly like a [project capacity](#project-capacity-configproject-capacity) deferral: nothing is launched or created, the backlog item stays queued, one `deferred:` line names the shortfall, and it exits 75 so Firstmate dispatches the item again later.
+`bin/fm-lint.sh` drops to one ShellCheck job and waits, up to `FM_MEM_HEADROOM_WAIT_SECONDS` (default 300), for headroom before each file it checks, and `bin/fm-test-run.sh` lowers `--jobs` to the number of threshold-sized shares that fit, never below one.
+The check bounds free memory only, never how many workers run, and it never pauses or stops work already running.
+Where memory cannot be measured, such as macOS or a container without `/proc/meminfo`, the check steps aside and the work proceeds.
+[`bin/fm-mem-headroom-lib.sh`](../bin/fm-mem-headroom-lib.sh) owns the verdict and its settings.
 
 ## Crew dispatch profiles (config/crew-dispatch.json)
 
@@ -2532,6 +2544,9 @@ FM_DATA_OVERRIDE=        # alternate data dir, mainly for tests
 FM_PROJECTS_OVERRIDE=    # alternate projects dir, mainly for tests
 FM_CONFIG_OVERRIDE=      # alternate config dir, mainly for tests
 FM_PROC_ROOT_OVERRIDE=   # alternate /proc root for Linux process-identity reads in fm-wake-lib.sh and fm-teardown.sh, mainly for tests
+FM_MEM_HEADROOM_MIB=1536   # free memory plus swap, in MiB, required before heavy work; 0 disables; see "Memory headroom"
+FM_MEM_HEADROOM_WAIT_SECONDS=300   # longest fm-lint waits for headroom before each file; FM_MEM_HEADROOM_POLL_SECONDS=5 sets the recheck interval
+FM_MEMINFO_OVERRIDE=     # alternate meminfo file for bin/fm-jev-mem-guard.py, mainly for tests
 FM_BACKEND=             # optional runtime backend override for new spawns; tmux/herdr/zellij/orca/cmux support ship/scout spawns, codex-app is not accepted
 FM_TRACE_CONTEXT=       # optional trace-context override; see "Trace context propagation"
 FM_TASK_ID=             # internal task-worker marker fm-spawn.sh exports into ship and scout panes, never set by hand; bin/fm-test-run.sh refuses to execute in the repository primary checkout while it is set

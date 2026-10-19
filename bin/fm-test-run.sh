@@ -68,6 +68,8 @@
 #                   scripts run serially after all concurrent phases. Default is
 #                   1 (serial) except for plain --changed and a plain list of
 #                   script paths, which use the bounded automatic scheduler.
+#                   On a host short of free memory the admitted count is then
+#                   clamped down (bin/fm-mem-headroom-lib.sh), never below 1.
 #   --per-script-timeout-secs N
 #                   terminate a script that runs longer than N seconds and
 #                   record it as exit 124 (0 disables, the default). The
@@ -394,7 +396,7 @@ family_for_basename() {
     fm-trace-context-spawn.test.sh|fm-spawn-worktree-settle.test.sh|\
     fm-spawn-compact-adviser-disable.test.sh|\
     fm-spawn-compact-adviser-disable-remote.test.sh|\
-    fm-project-capacity.test.sh|\
+    fm-project-capacity.test.sh|fm-mem-headroom.test.sh|\
     fm-teardown-endpoint-safety.test.sh)
       printf '%s\n' backend-dispatch
       ;;
@@ -2312,6 +2314,24 @@ if [ "$JOBS" -gt 1 ] && [ "$AUTO_CONCURRENCY" -eq 0 ]; then
         || die "--jobs $JOBS refused: family $family is proven only up to $family_jobs_max concurrent workers"
     fi
   done
+fi
+
+# On a host short of free memory (bin/fm-mem-headroom-lib.sh owns the verdict)
+# concurrent workers are clamped after admission to the number of
+# threshold-sized shares the free memory holds, never below one, so a batch of
+# test processes cannot push the host into the OOM killer; the recorded
+# selection names the clamped count.
+if [ "$JOBS" -gt 1 ] && [ -r "$ROOT/bin/fm-mem-headroom-lib.sh" ]; then
+  # shellcheck source=bin/fm-mem-headroom-lib.sh
+  . "$ROOT/bin/fm-mem-headroom-lib.sh"
+  fm_mem_headroom_clamp_jobs "$JOBS"
+  clamped_jobs=$FM_MEM_HEADROOM_JOBS
+  if [ "$clamped_jobs" -lt "$JOBS" ]; then
+    log "$FM_MEM_HEADROOM_AVAILABLE_MIB MiB of free memory and swap holds $clamped_jobs share(s) of $FM_MEM_HEADROOM_THRESHOLD_MIB MiB; running with --jobs $clamped_jobs instead of $JOBS"
+    JOBS=$clamped_jobs
+    [ "$JOBS" -gt 1 ] || AUTO_CONCURRENCY=0
+    SELECTION_DESC="${SELECTION_DESC%;jobs=*};jobs=$JOBS"
+  fi
 fi
 
 # Split the run into proven concurrent phases and an unproven remainder.

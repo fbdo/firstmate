@@ -23,6 +23,9 @@ Invariants:
   - Bounded sub-second execution (< 500ms).
   - Status is OK, WARNING, CRITICAL, or UNKNOWN; recommendation is diagnostic text
     for the operator, never a command.
+  - --available-mib prints MemAvailable plus SwapFree in MiB (or "unknown"), the
+    headroom figure bin/fm-mem-headroom-lib.sh judges before heavy work.
+  - FM_MEMINFO_OVERRIDE names an alternate meminfo file, for tests.
 """
 
 import argparse
@@ -34,10 +37,10 @@ from typing import Any, Dict, List, Optional
 
 
 def read_meminfo() -> Dict[str, int]:
-    """Reads and parses /proc/meminfo in kB."""
+    """Reads and parses /proc/meminfo (or FM_MEMINFO_OVERRIDE, for tests) in kB."""
     info: Dict[str, int] = {}
     try:
-        with open("/proc/meminfo", "r") as f:
+        with open(os.environ.get("FM_MEMINFO_OVERRIDE") or "/proc/meminfo", "r") as f:
             for line in f:
                 parts = line.split(":")
                 if len(parts) == 2:
@@ -48,6 +51,15 @@ def read_meminfo() -> Dict[str, int]:
     except Exception:
         pass
     return info
+
+
+def available_mib() -> Optional[int]:
+    """MemAvailable plus free swap in MiB, or None when meminfo cannot say."""
+    mem = read_meminfo()
+    avail_kb = mem.get("MemAvailable")
+    if avail_kb is None:
+        return None
+    return (avail_kb + mem.get("SwapFree", 0)) // 1024
 
 
 def get_top_rss_processes(top_n: int = 10) -> List[Dict[str, Any]]:
@@ -224,7 +236,17 @@ def main():
         help="Exit 0 for OK or unknown (fail-open), exit 1 for WARNING or CRITICAL",
     )
 
+    parser.add_argument(
+        "--available-mib",
+        action="store_true",
+        help="Print MemAvailable plus free swap in MiB, or 'unknown' when meminfo is unreadable, and exit 0",
+    )
+
     args = parser.parse_args()
+    if args.available_mib:
+        value = available_mib()
+        print("unknown" if value is None else value)
+        return
     report = audit_memory(
         warn_mem_pct=args.warn_mem_pct,
         crit_mem_pct=args.crit_mem_pct,

@@ -207,6 +207,10 @@
 #   A batch reports such a pair as `batch: DEFERRED` and exits 75 when nothing
 #   else failed. A relaunch and a --secondmate spawn are never counted against
 #   capacity.
+#   Memory headroom: just before that capacity check, a fresh ship or scout
+#   spawn on a host whose free memory plus swap is below the threshold
+#   (bin/fm-mem-headroom-lib.sh owns the verdict) is deferred the same way: one
+#   `deferred:` line, exit 75, nothing created. Unmeasurable memory admits it.
 #   With no harness arg, a crewmate/scout spawn resolves the CREW harness only when
 #   config/crew-dispatch.json is absent. When that file exists, crewmate/scout
 #   spawns require an explicit harness so firstmate cannot silently skip dispatch
@@ -810,6 +814,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
 # shellcheck source=bin/fm-project-capacity-lib.sh
 . "$SCRIPT_DIR/fm-project-capacity-lib.sh"
+# shellcheck source=bin/fm-mem-headroom-lib.sh
+. "$SCRIPT_DIR/fm-mem-headroom-lib.sh"
 # shellcheck source=bin/fm-worker-account-lib.sh
 . "$SCRIPT_DIR/fm-worker-account-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
@@ -1849,7 +1855,7 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
     pair_rc=0
     FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "${pair_args[@]}" || pair_rc=$?
     if [ "$pair_rc" -eq "$FM_PROJECT_CAPACITY_DEFER_EXIT" ]; then
-      echo "batch: DEFERRED ${pair%%=*} (${pair#*=}) - its project is at capacity, so it stays queued" >&2
+      echo "batch: DEFERRED ${pair%%=*} (${pair#*=}) - its project is at capacity or the host is short of free memory, so it stays queued" >&2
       [ "$rc" -ne 0 ] || rc=$FM_PROJECT_CAPACITY_DEFER_EXIT
     elif [ "$pair_rc" -ne 0 ]; then
       echo "batch: FAILED to spawn ${pair%%=*} (${pair#*=})" >&2
@@ -3567,6 +3573,13 @@ fi
 # any brief render, endpoint, worktree, record, or backlog move exists, so the
 # deferral leaves the task exactly as queued as it was. A relaunch replaces a
 # worker that already holds a place, and a secondmate is not a worker.
+# Memory headroom admission (bin/fm-mem-headroom-lib.sh owns the verdict): a
+# fresh worker is deferred exactly like a capacity deferral when this host is
+# short of free memory, so the launch cannot push the host into the OOM killer.
+if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && fm_mem_headroom_low; then
+  echo "deferred: this host has $FM_MEM_HEADROOM_AVAILABLE_MIB MiB of free memory and swap, below the $FM_MEM_HEADROOM_THRESHOLD_MIB MiB a fresh worker needs (docs/configuration.md \"Memory headroom\"); task $ID was not launched and its backlog item stays queued - dispatch it again once memory frees" >&2
+  exit "$FM_PROJECT_CAPACITY_DEFER_EXIT"
+fi
 SPAWN_PROJECT_CAPACITY=
 SPAWN_PROJECT_CAPACITY_ANY=
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then

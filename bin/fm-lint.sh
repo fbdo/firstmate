@@ -46,6 +46,9 @@
 # run holds at most JOBS concurrent ShellCheck processes. Diagnostics replay
 # in stable shard/root order. FM_LINT_JOBS=1 changes concurrency, not diagnostics
 # or exit selection.
+# On a host short of free memory (bin/fm-mem-headroom-lib.sh owns the verdict)
+# lint drops to one job, and each root waits, bounded, for headroom before it
+# starts; neither changes diagnostics or exit selection.
 # --partition 1of2/2of2 splits the entire canonical inventory across
 # two CI runners, each with those same concurrency-limited workers.
 # Partitions are complete, disjoint, and byte-weight balanced; --list-files
@@ -129,6 +132,12 @@ cd "$ROOT" || exit 1
 if [ -r "$SELF_DIR/fm-timeout-lib.sh" ]; then
   # shellcheck source=bin/fm-timeout-lib.sh
   . "$SELF_DIR/fm-timeout-lib.sh"
+fi
+# The memory headroom owner lowers concurrency and paces roots on a host short
+# of free memory; without it lint runs exactly as before.
+if [ -r "$SELF_DIR/fm-mem-headroom-lib.sh" ]; then
+  # shellcheck source=bin/fm-mem-headroom-lib.sh
+  . "$SELF_DIR/fm-mem-headroom-lib.sh"
 fi
 
 FM_LINT_WORKER_RUN_PID=
@@ -278,6 +287,9 @@ fm_lint_run_root() {  # <index> <path> <output-dir> <shard-index>
   local fallback_secs
   local final_follow_sources=${FM_LINT_INTERNAL_FOLLOW_SOURCES:-1}
   local -a fallback_args
+  # Wait for memory headroom before the root's clock starts, so the bounded
+  # wait never spends the root's own deadline.
+  ! declare -F fm_mem_headroom_wait >/dev/null 2>&1 || fm_mem_headroom_wait "fm-lint root $path"
   start_ms=$(fm_lint_now_ms)
   if [ -n "${FM_LINT_INTERNAL_ROOTS_LOG:-}" ]; then
     printf 'begin\t%s\t%s\t%s\t%s\t%s\n' \
@@ -772,6 +784,11 @@ case "$JOBS" in
   1|2) ;;
   *) printf 'fm-lint.sh: jobs must be 1 or 2, got %s.\n' "$JOBS" >&2; exit 2 ;;
 esac
+if [ "$JOBS" -gt 1 ] && declare -F fm_mem_headroom_low >/dev/null 2>&1 && fm_mem_headroom_low; then
+  printf 'fm-lint.sh: %s MiB of free memory and swap is below %s MiB; running one ShellCheck job\n' \
+    "$FM_MEM_HEADROOM_AVAILABLE_MIB" "$FM_MEM_HEADROOM_THRESHOLD_MIB" >&2
+  JOBS=1
+fi
 
 case "$PARTITION" in
   '')

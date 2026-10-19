@@ -68,6 +68,11 @@ unset FM_TASK_ID
 # against an ambient override sets TASKS_AXI_FILE itself.
 unset TASKS_AXI_FILE TASKS_AXI_BACKEND
 
+# Disable the free-memory check (bin/fm-mem-headroom-lib.sh) so a suite's
+# verdicts never depend on how much memory the host has free at that moment.
+# tests/fm-mem-headroom.test.sh sets its own threshold and fake meminfo.
+export FM_MEM_HEADROOM_MIB=0
+
 # Write the tracked default backlog configuration into a fixture home. Never copy
 # "$ROOT/.tasks.toml": an operator's primary checkout keeps a gitignored override
 # there (for example a beads backend at its live backlog), so a copy points the
