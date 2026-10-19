@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# fake-jcode - a stand-in `jcode` for the portable jcode tests.
+#   api-bridge --api-socket <p>   forward <p> to $JCODE_SOCKET (the fake daemon)
+#   --version                     print a version line
+#   model list --json             print a small catalog
+# Every invocation is appended to $FAKE_JCODE_LOG. There is deliberately no
+# `serve`/`server` role: Firstmate must never start the shared daemon, so the
+# tests assert the log never names one.
+HERE=$(CDPATH='' cd -- "$(dirname -- "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd -P)
+[ -z "${FAKE_JCODE_LOG:-}" ] || printf '%s\n' "$*" >>"$FAKE_JCODE_LOG"
+args=("$@")
+for a in "${args[@]}"; do
+  case "$a" in
+    --version) echo "jcode v0.99.0 (fake)"; exit 0 ;;
+    serve|server) echo "fake-jcode: refusing to start a daemon" >&2; exit 9 ;;
+  esac
+done
+i=0
+while [ $i -lt ${#args[@]} ]; do
+  case "${args[$i]}" in
+    api-bridge)
+      sock=''
+      for ((j = i + 1; j < ${#args[@]}; j++)); do
+        [ "${args[$j]}" = --api-socket ] && sock=${args[$((j + 1))]}
+      done
+      [ -n "$sock" ] || exit 2
+      exec node "$HERE/fake-jcode-api.mjs" proxy "$sock" "${JCODE_SOCKET:?}"
+      ;;
+    model) echo '{"models":["claude-sonnet-5-5","m1"]}'; exit 0 ;;
+  esac
+  i=$((i + 1))
+done
+exit 0
