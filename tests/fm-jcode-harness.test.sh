@@ -476,6 +476,10 @@ process.stdin.on("data", (d) => {
         log({ req: f.req, session: id, effort: f.effort });
         out({ reply_to: f.id, ev: "ok" });
         break;
+      case "runtime_command":
+        log({ req: f.req, session: id, command: f.command, args: f.args, client_attached: clientAttached(id) });
+        out({ reply_to: f.id, ev: "runtime_command_result", data: { enabled: false } });
+        break;
       case "rename_session":
         log({ req: f.req, session: id, title: f.title });
         out({ reply_to: f.id, ev: "ok" });
@@ -776,6 +780,28 @@ EOF
     *) fail "the brief turn's hooks must advance the busy record, got '$(fm_busy_record_read "$home/state" "$id")'" ;;
   esac
   pass "fm-spawn: the jcode session is created and bound before launch, and the brief goes out only after the client attaches"
+}
+
+test_pane_worker_memory_flag() {
+  local rec dir home proj wt fb out rc
+  command -v node >/dev/null 2>&1 || { pass "pane worker memory: skipped (node unavailable)"; return; }
+  rec=$(make_jcode_spawn_case mem1 jcmem1)
+  IFS='|' read -r dir home proj wt fb <<EOF
+$rec
+EOF
+  out=$(run_jcode_spawn "$rec" jcmem1 --model fake/good); rc=$?
+  expect_code 0 "$rc" "spawn should succeed (output: $out)"
+  assert_contains "$(cat "$dir/api.log")" '"req":"runtime_command","session":"session_fake_1","command":"memory","args":["off"],"client_attached":true' \
+    "a pane worker must get memory off, sent only after the TUI client attached"
+  rec=$(make_jcode_spawn_case mem2 jcmem2)
+  IFS='|' read -r dir home proj wt fb <<EOF
+$rec
+EOF
+  printf 'on\n' >"$home/config/jcode-worker-memory"
+  out=$(run_jcode_spawn "$rec" jcmem2 --model fake/good); rc=$?
+  expect_code 0 "$rc" "spawn with memory on should succeed (output: $out)"
+  [ "$(jc_requests "$dir" runtime_command)" -eq 0 ] || fail "config/jcode-worker-memory=on must send no memory command"
+  pass "pane worker memory: off after client attach by default, untouched when config/jcode-worker-memory is on"
 }
 
 test_spawn_refusals_and_failed_gates() {
@@ -1096,6 +1122,7 @@ test_client_pid_needs_all_three_proofs
 test_dispatcher_records_worker_busy
 test_silent_stop_is_recorded_as_blocked
 test_spawn_creates_binds_and_delivers_after_attach
+test_pane_worker_memory_flag
 test_spawn_refusals_and_failed_gates
 test_control_interrupts_and_exits_through_the_api
 test_control_tables_name_jcode_a_worker_adapter

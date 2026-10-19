@@ -192,6 +192,21 @@ test_never_attaches_unrecorded() {
   pass "the keeper attaches only recorded sessions"
 }
 
+test_worker_memory_flag_on_skips_memory_off() {
+  local before sid
+  before=$(memory_off_count)
+  mkdir -p "$FMH/config"
+  printf 'on\n' >"$FMH/config/jcode-worker-memory"
+  dctl "drop"
+  sleep 4
+  [ "$(memory_off_count)" -eq "$before" ] || fail "config/jcode-worker-memory=on must stop the keeper sending memory off"
+  rm -f "$FMH/config/jcode-worker-memory"
+  dctl "drop"
+  wait_for "memory off back after the flag is removed" bash -c "[ \$(grep -c '\"args\":\\[\"off\"\\]' '$DDIR/requests.log') -gt $before ]"
+  sid=$SID1
+  pass "config/jcode-worker-memory=on makes the keeper skip memory off; absent it resumes"
+}
+
 test_keeper_idle_exit() {
   local pid
   rm -f "$FMH/state/t1.jcode-session" "$FMH/state/t2.jcode-session"
@@ -207,6 +222,7 @@ test_injected_and_failure_records
 test_memory_resent_after_reconnect
 test_children_recorded
 test_never_attaches_unrecorded
+test_worker_memory_flag_on_skips_memory_off
 test_keeper_idle_exit
 
 # ---- step 5: crashed-turn recovery -------------------------------------------

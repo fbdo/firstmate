@@ -128,6 +128,14 @@ function metaValue(id, key) {
     return "";
   }
 }
+function workerMemoryOn() {
+  const dir = process.env.FM_CONFIG_OVERRIDE || path.join(HOME, "config");
+  try {
+    return fs.readFileSync(path.join(dir, "jcode-worker-memory"), "utf8").trim().toLowerCase() === "on";
+  } catch {
+    return false;
+  }
+}
 function ownedSessions() {
   const out = new Map();
   let names = [];
@@ -322,7 +330,10 @@ async function attach(session, h) {
   h.attaching = false;
   const priorLive = readLive(session);
   // Memory-off is not durable once nothing holds the session (G6): re-apply on every attach.
-  await conn.request({ req: "runtime_command", session_id: session, command: "memory", args: ["off"] });
+  // config/jcode-worker-memory=on opts the workers out of this (docs/jcode-backend.md).
+  if (!workerMemoryOn()) {
+    await conn.request({ req: "runtime_command", session_id: session, command: "memory", args: ["off"] });
+  }
   log(`attached ${session}`);
   // A turn the keeper last saw busy (or lost track of) may have been abandoned by a restart.
   if (priorLive === "busy" || priorLive === "unknown" || h.recovery) {

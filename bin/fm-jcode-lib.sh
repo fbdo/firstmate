@@ -372,3 +372,20 @@ fm_jcode_secondmate_hook_target() {  # <state-dir> <toplevel> <session>
   done
   return 1
 }
+
+# Worker memory flag (docs/jcode-backend.md "Worker memory"). <config-dir>/
+# jcode-worker-memory reads `on` or `off`; absent is off. Exit 0 only for `on`.
+# Any other value is treated as off with one warning on stderr.
+fm_jcode_worker_memory_on() {  # <config-dir>
+  local file="$1/jcode-worker-memory" value
+  [ -f "$file" ] || return 1
+  value=$(tr -d '[:space:]' <"$file" 2>/dev/null | tr '[:upper:]' '[:lower:]')
+  case "$value" in
+    on) return 0 ;;
+    off | '') return 1 ;;
+    *)
+      echo "warning: $file holds '$value', not on or off; treating jcode worker memory as off" >&2
+      return 1
+      ;;
+  esac
+}

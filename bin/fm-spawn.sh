@@ -5138,6 +5138,12 @@ jcode_wait_for_ready() {
     JCODE_READY_FAILURE="no jcode client attached to session $JCODE_SESSION in window $T, so the brief was not sent"
     return 1
   fi
+  # Worker memory is off unless config/jcode-worker-memory says on. The TUI client
+  # attached above holds the session, which is what keeps the setting (G6). A
+  # secondmate follows the daemon's memory setting like any primary.
+  if [ "$KIND" != secondmate ] && ! fm_jcode_worker_memory_on "$CONFIG"; then
+    fm_jcode_api runtime "$JCODE_SESSION" memory off >/dev/null 2>&1 || true
+  fi
   if ! "$FM_ROOT/bin/fm-operational-input.sh" encode launch-brief <"$BRIEF" | fm_jcode_api send "$JCODE_SESSION" >/dev/null; then
     JCODE_READY_FAILURE="the brief could not be delivered to jcode session $JCODE_SESSION through the harness API"
     return 1
