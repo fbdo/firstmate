@@ -622,6 +622,45 @@ test_dispatcher_records_worker_busy() {
   pass "dispatcher: a bound worker's turns move only its own record, in its own worktree, under its own generation"
 }
 
+test_silent_stop_is_recorded_as_blocked() {
+  local primary wt gen status
+  primary="$TMP_ROOT/stop-primary"
+  make_primary_copy "$primary"
+  wt="$TMP_ROOT/stop-wt"
+  mkdir -p "$wt"
+  git -C "$wt" init -q
+  gen=$("$primary/bin/fm-busy-event.sh" arm "$primary/state" s1) || fail "could not arm the busy contract"
+  # shellcheck source=bin/fm-jcode-lib.sh
+  . "$ROOT/bin/fm-jcode-lib.sh"
+  fm_jcode_write_session_record "$primary/state" s1 session_s "$gen" "$wt" || fail "could not bind the session"
+  status="$primary/state/s1.status"
+  : > "$status"
+  stop_hook() {  # <status> <error>
+    env "${SCRUB[@]}" JCODE_HOOK_EVENT=turn_end JCODE_HOOK_SESSION_ID=session_s JCODE_HOOK_CWD="$wt" \
+      JCODE_HOOK_STATUS="$1" JCODE_HOOK_ERROR="$2" "$primary/bin/fm-jcode-hook.sh" </dev/null
+  }
+  stop_hook ok '' || fail "hooks always exit 0"
+  stop_hook error 'some unrelated tool failure' || fail "hooks always exit 0"
+  [ ! -s "$status" ] || fail "a normal or unrelated turn end must not write a status line: $(cat "$status")"
+  stop_hook error 'Claude OAuth token is expired and refresh failed: {"error": "invalid_grant"}' || fail "hooks always exit 0"
+  grep -q '^blocked \[at=[0-9]*\]: jcode could not authenticate' "$status" || fail "an auth failure turn end must record blocked, got: $(cat "$status")"
+  stop_hook error 'Claude OAuth token is expired and refresh failed: {"error": "invalid_grant"}' || fail "hooks always exit 0"
+  [ "$(wc -l < "$status")" -eq 1 ] || fail "a repeated identical failure must not append twice"
+  stop_hook error 'Stream stalled (no response for 12m 30s). Processing cancelled.' || fail "hooks always exit 0"
+  grep -q 'stream-idle timeout' "$status" || fail "a stream-idle cancellation must record blocked, got: $(cat "$status")"
+  fm_jcode_silent_stop_reason 'all fine' >/dev/null && fail "ordinary text must not classify as a silent stop"
+  case "$(status_verb_of_last "$status")" in blocked) ;; *) fail "the recorded line must classify as blocked" ;; esac
+  pass "dispatcher: a turn that ends on an auth failure or stream-idle cancel is recorded as blocked, once"
+}
+
+status_verb_of_last() {  # <status-file>
+  # shellcheck source=bin/fm-classify-lib.sh
+  . "$ROOT/bin/fm-classify-lib.sh"
+  local vb=''
+  status_line_verb "$(last_status_line "$1")" vb
+  printf '%s' "$vb"
+}
+
 # The spawn flow through the real fm-spawn.sh with a fake tmux whose send-keys
 # sources the staged launch file for real, so the fake jcode client attaches.
 make_jcode_spawn_case() {  # <name> <id> -> "case|home|proj|wt|fakebin"
@@ -894,6 +933,7 @@ test_setup_helper
 test_api_client_creates_persists_and_cancels
 test_client_pid_needs_all_three_proofs
 test_dispatcher_records_worker_busy
+test_silent_stop_is_recorded_as_blocked
 test_spawn_creates_binds_and_delivers_after_attach
 test_spawn_refusals_and_failed_gates
 test_control_interrupts_and_exits_through_the_api

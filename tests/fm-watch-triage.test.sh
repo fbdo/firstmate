@@ -7300,3 +7300,137 @@ test_exit_picker_wedge_keeps_climbing
 test_quoted_exit_picker_stays_ordinary_stale
 test_secondmate_exit_picker_stays_quiet
 test_closed_exit_picker_drops_saved_dialog_name
+
+# --- worker stall detection: no-progress nudge, jcode silent stops, jcode churn ---
+
+prime_stall_window() {  # <state> <id> <window> <harness> <capture> <status-line> [worktree]
+  local state=$1 id=$2 window=$3 harness=$4 capture=$5 status_line=$6 wt=${7-} key
+  printf 'window=%s\nkind=ship\nharness=%s\n' "$window" "$harness" > "$state/$id.meta"
+  [ -z "$wt" ] || printf 'worktree=%s\n' "$wt" >> "$state/$id.meta"
+  printf '%s\n' "$status_line" > "$state/$id.status"
+  printf '%s' "$(seen_sig "$state/$id.status")" > "$state/.seen-${id}_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  printf '%s' "$(hash_text "$(cat "$capture")")" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  printf '%s' "$key"
+}
+
+run_stall_watcher() {  # <dir> <window> [env assignments...]
+  local dir=$1 window=$2
+  shift 2
+  PATH="$dir/fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$dir/pane.txt" \
+    FM_STATE_OVERRIDE="$dir/state" FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" \
+    FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    FM_SECONDMATE_LIVENESS_SECS=99999999 env "$@" "$WATCH" > "$dir/watch.out" &
+}
+
+test_noprogress_nudges_then_wakes() {
+  local dir state window key pid wt rec
+  dir=$(make_case noprogress); state="$dir/state"; window="test:fm-noprog"
+  wt="$dir/wt"; mkdir -p "$wt"
+  printf 'Working...' > "$dir/pane.txt"
+  key=$(prime_stall_window "$state" noprog "$window" pi "$dir/pane.txt" 'working: started' "$wt")
+  record_pi_busy "$state" noprog
+  echo $(( $(date +%s) - 5000 )) > /dev/null
+  : > "$state/.noprog-$key"; set_mtime $(( $(date +%s) - 2000 )) "$state/.noprog-$key"
+  run_stall_watcher "$dir" "$window" FM_NOPROGRESS_SECS=1200; pid=$!
+  wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "the nudge poll exited early: $(cat "$dir/watch.out")"; }
+  [ ! -s "$dir/watch.out" ] || fail "the first no-progress interval woke firstmate instead of nudging: $(cat "$dir/watch.out")"
+  rec=$(find "$state/noprog.inbox" -maxdepth 1 -name '*.msg' | head -n 1)
+  [ -n "$rec" ] || fail "no nudge reached the steering inbox"
+  grep -q 'Commit to the first workable approach' "$rec" || fail "the nudge did not ask for a commitment: $(cat "$rec")"
+  [ "$(cat "$state/.noprog-rung-$key")" = nudged ] || fail "the nudge rung was not recorded"
+  reap "$pid"
+  ack_stopped_cycle "$state" >/dev/null 2>&1 || true
+  set_mtime $(( $(date +%s) - 2000 )) "$state/.noprog-$key"
+  : > "$dir/watch.out"
+  run_stall_watcher "$dir" "$window" FM_NOPROGRESS_SECS=1200; pid=$!
+  wait_for_exit "$pid" 100 || fail "a second silent interval did not wake firstmate"
+  grep -F "stale: $window" "$dir/watch.out" >/dev/null || fail "the escalation was not a stale wake: $(cat "$dir/watch.out")"
+  grep -F 'no-progress' "$dir/watch.out" >/dev/null || fail "the escalation did not state a no-progress reason: $(cat "$dir/watch.out")"
+  [ "$(find "$state/noprog.inbox" -maxdepth 1 -name '*.msg' | wc -l)" -eq 1 ] || fail "the escalation sent a second nudge"
+  pass "a busy worker with no worktree writes is nudged once, then escalated after another interval"
+}
+
+test_noprogress_resets_on_writes_and_waits() {
+  local dir state window key pid wt
+  dir=$(make_case noprogress-writes); state="$dir/state"; window="test:fm-noprog-w"
+  wt="$dir/wt"; mkdir -p "$wt"
+  printf 'Working...' > "$dir/pane.txt"
+  key=$(prime_stall_window "$state" noprogw "$window" pi "$dir/pane.txt" 'working: started' "$wt")
+  record_pi_busy "$state" noprogw
+  : > "$state/.noprog-$key"; set_mtime $(( $(date +%s) - 2000 )) "$state/.noprog-$key"
+  printf 'edit\n' > "$wt/file.txt"
+  run_stall_watcher "$dir" "$window" FM_NOPROGRESS_SECS=1200; pid=$!
+  wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "the writing worker poll exited: $(cat "$dir/watch.out")"; }
+  [ ! -d "$state/noprogw.inbox" ] || [ -z "$(find "$state/noprogw.inbox" -maxdepth 1 -name '*.msg')" ] \
+    || fail "a worker that wrote files was nudged"
+  [ ! -e "$state/.noprog-rung-$key" ] || fail "a writing worker kept a nudge rung"
+  reap "$pid"
+  # A declared wait is not deliberation.
+  printf 'paused [at=1]: waiting on a build\n' >> "$state/noprogw.status"
+  : > "$state/.noprog-$key"; set_mtime $(( $(date +%s) - 2000 )) "$state/.noprog-$key"
+  rm -f "$wt/file.txt"
+  run_stall_watcher "$dir" "$window" FM_NOPROGRESS_SECS=1200; pid=$!
+  wait_poll_cycle "$state" "$pid" || true
+  [ -z "$(find "$state/noprogw.inbox" -maxdepth 1 -name '*.msg' 2>/dev/null)" ] || fail "a worker with a declared wait was nudged"
+  reap "$pid"
+  pass "worktree writes and declared waits keep the no-progress detector quiet"
+}
+
+test_jcode_stream_stalled_pane_records_blocked() {
+  local dir state window key pid
+  dir=$(make_case jcode-stalled); state="$dir/state"; window="test:fm-jstall"
+  printf '%s\n' 'some output' '⚠ Stream stalled (no response for 12m 30s). Processing cancelled.' > "$dir/pane.txt"
+  key=$(prime_stall_window "$state" jstall "$window" jcode "$dir/pane.txt" 'working: started')
+  "$ROOT/bin/fm-busy-event.sh" arm "$state" jstall --state idle --source jcode-hook --event turn-end >/dev/null
+  run_stall_watcher "$dir" "$window"; pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "a stream-stalled jcode pane did not wake firstmate"; }
+  grep -q '^blocked \[at=[0-9]*\]: jcode cancelled the turn after its stream went idle' "$state/jstall.status" \
+    || fail "the stream-idle notice was not recorded as blocked: $(cat "$state/jstall.status")"
+  [ "$(grep -c '^blocked' "$state/jstall.status")" -eq 1 ] || fail "the stop was recorded more than once"
+  [ -n "$key" ] || fail "no window key"
+  pass "a jcode pane showing the stream-idle notice is recorded as blocked and wakes firstmate"
+}
+
+test_finished_jcode_idle_redraw_not_reraised() {
+  local dir state window key pid
+  dir=$(make_case jcode-churn); state="$dir/state"; window="test:fm-jchurn"
+  printf 'idle screen 10:01\n' > "$dir/pane.txt"
+  key=$(prime_stall_window "$state" jchurn "$window" jcode "$dir/pane.txt" 'done [at=1]: ready')
+  "$ROOT/bin/fm-busy-event.sh" arm "$state" jchurn --state idle --source jcode-hook --event turn-end >/dev/null
+  # First sight of the finished worker surfaces once.
+  run_stall_watcher "$dir" "$window"; pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "the first sight of a finished jcode worker did not surface"; }
+  grep -F "stale: $window" "$dir/watch.out" >/dev/null || fail "the first stale was not surfaced: $(cat "$dir/watch.out")"
+  ack_stopped_cycle "$state" >/dev/null 2>&1 || true
+  # The idle TUI redraws a timer: a new hash must not re-raise it.
+  printf 'idle screen 10:02\n' > "$dir/pane.txt"
+  : > "$dir/watch.out"
+  run_stall_watcher "$dir" "$window"; pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "a redrawing finished jcode worker was re-raised: $(cat "$dir/watch.out")"
+  fi
+  [ ! -s "$dir/watch.out" ] || fail "a redrawing finished jcode worker printed a wake: $(cat "$dir/watch.out")"
+  reap "$pid"
+  # A pane that is busy per the hooks is not exempt: churn does not hide it.
+  "$ROOT/bin/fm-busy-event.sh" arm "$state" jchurn --state busy --source jcode-hook --event turn-start >/dev/null
+  if jcode_finished_idle_churn_probe "$state" jchurn "$window" "$key"; then
+    fail "a busy jcode worker was treated as finished"
+  fi
+  pass "a finished idle jcode worker's pane redraw is not re-raised, a busy one keeps normal handling"
+}
+
+jcode_finished_idle_churn_probe() {  # <state> <id> <window> <key>
+  FM_STATE_OVERRIDE="$1" bash -c '
+    . "$1/bin/fm-busy-lib.sh"
+    rec=$(fm_busy_record_read "$2" "$3") || exit 1
+    case "$rec" in "idle jcode-hook "*) exit 0 ;; esac
+    exit 1
+  ' _ "$ROOT" "$1" "$2"
+}
+
+test_noprogress_nudges_then_wakes
+test_noprogress_resets_on_writes_and_waits
+test_jcode_stream_stalled_pane_records_blocked
+test_finished_jcode_idle_redraw_not_reraised

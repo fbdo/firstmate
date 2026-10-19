@@ -90,6 +90,13 @@
 #                          agent, for human inspection only - never an automatic
 #                          interrupt, signal, or restart of the worker or its
 #                          tool process.
+#   stale: <window> (no-progress: busy for over <n>s with no worktree writes, ...)
+#                          a busy worker wrote nothing in its worktree for two
+#                          FM_NOPROGRESS_SECS intervals; the first interval sent
+#                          it one steering-inbox nudge (noprogress_check). A jcode
+#                          worker's auth failure or stream-idle cancel is instead
+#                          appended to its status log as `blocked` and arrives as
+#                          an ordinary status signal.
 #   stale: <window> (unread firstmate instruction: ...)
 #   stale: <window> (steering-inbox ladder bookkeeping unwritable: ...)
 #   stale: <window> (steering-inbox busy bookkeeping unwritable: ...)
@@ -229,6 +236,8 @@ WATCH_HOME_EXISTED=0
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 # shellcheck source=bin/fm-busy-lib.sh
 . "$SCRIPT_DIR/fm-busy-lib.sh"
+# shellcheck source=bin/fm-jcode-lib.sh
+. "$SCRIPT_DIR/fm-jcode-lib.sh"
 # Steering-inbox loss detection: bin/fm-task-inbox-lib.sh owns the record,
 # doorbell, re-ring ladder, and unavailable-endpoint contracts; this watcher
 # supplies their live endpoint and busy checks plus wake emission
@@ -355,6 +364,13 @@ STALE_ESCALATE_SECS=${FM_STALE_ESCALATE_SECS:-240}  # idle secs before a provabl
 # any legitimate interval without observable progress, including silent long
 # tool calls, builds, or test runs.
 BUSY_TURN_MAX_SECS=${FM_BUSY_TURN_MAX_SECS:-3600}
+# A busy worker whose task worktree sees no file write for this long is
+# deliberating rather than working: it gets one steering-inbox nudge to commit
+# to an approach, and a second interval of no writes wakes firstmate. 0 turns the
+# detector off. The write evidence is crew_worktree_written_since, the same walk
+# the wedge timer uses; nothing here interrupts a worker.
+NOPROGRESS_SECS=${FM_NOPROGRESS_SECS:-1200}
+case "$NOPROGRESS_SECS" in ''|*[!0-9]*) NOPROGRESS_SECS=1200 ;; esac
 # A local secondmate's foreign queue is checked on every poll, but only after this
 # bounded interval with no drain progress can it produce a parent notification.
 # A healthy mate drains its queue between turns, not inside one, so this default
@@ -1701,6 +1717,119 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
       fi
       ;;
   esac
+}
+
+# noprogress_check: the no-progress detector for a busy worker. The anchor file
+# .noprog-<key> marks when the current observation interval opened; once it is
+# NOPROGRESS_SECS old, one worktree walk decides. A write since the anchor means
+# real work: the interval restarts and the ladder resets. No write sends the
+# first nudge through the steering inbox (the same durable record fm-send
+# writes) and restarts the interval; no write in the next interval wakes
+# firstmate once with a stuck reason, after which the worker stays quiet until
+# it writes again. A worker that declared a wait, or one that is not busy, has
+# nothing to prove and resets the ladder. Never interrupts anything: whether to
+# interrupt is firstmate's call through bin/fm-control.sh.
+noprogress_check() {  # <window> <task> <window-key> <busy-now> <kind>
+  local win=$1 task=$2 key=$3 busy_now=$4 kind=$5 anchor rung age rec backend reason
+  [ "$NOPROGRESS_SECS" -gt 0 ] || return 0
+  anchor="$STATE/.noprog-$key"
+  rung="$STATE/.noprog-rung-$key"
+  if [ -z "$task" ] || [ "$kind" = secondmate ] || [ "$busy_now" -ne 0 ] || afk_present \
+     || status_is_paused_or_captain_held "$(status_declared_wait_line "$STATE/$task.status")"; then
+    rm -f "$anchor" "$rung"
+    return 0
+  fi
+  [ -e "$anchor" ] || { : > "$anchor"; return 0; }
+  age=$(age_of "$anchor")
+  [ "$age" -ge "$NOPROGRESS_SECS" ] || return 0
+  if crew_worktree_written_since "$task" "$STATE" "$anchor"; then
+    : > "$anchor"
+    rm -f "$rung"
+    return 0
+  fi
+  case "$(cat "$rung" 2>/dev/null || true)" in
+    woken)
+      : > "$anchor"
+      ;;
+    nudged)
+      reason="stale: $win (no-progress: busy for over ${age}s with no worktree writes, and it did not act on the nudge to commit to an approach; inspect the worker and interrupt it through fm-control if it is looping)"
+      printf 'woken' > "$rung"
+      : > "$anchor"
+      fm_wake_append stale "$win" "$reason" || exit 1
+      wake "$reason"
+      ;;
+    *)
+      backend=$(window_backend "$win")
+      if rec=$(fm_task_inbox_write "$STATE" "$task" \
+        "Firstmate nudge: you have been busy for over $(( age / 60 )) minutes with no file changes. Commit to the first workable approach now and start editing. Do not revisit settled decisions. If you are torn between options, append needs-decision and stop."); then
+        fm_task_inbox_ring "$backend" "$win" "$rec" "$(window_label "$win")" || true
+        printf 'nudged' > "$rung"
+        triage_log "no-progress nudge sent: $win (${age}s without worktree writes)"
+      else
+        triage_log "no-progress nudge could not be recorded: $win"
+      fi
+      : > "$anchor"
+      ;;
+  esac
+}
+
+# jcode_silent_stop_check: a jcode worker whose turn ended without a report. The
+# turn_end hook records an error-ended turn (bin/fm-jcode-hook.sh); this covers
+# the stream-idle cancellation, which only the pane shows. Run for an idle jcode
+# pane whose latest status is not already captain-relevant: a matching notice in
+# the captured tail is appended as a blocked status, which wakes firstmate
+# through the ordinary status signal. One report per status log length, so a
+# notice that stays in the scrollback is not re-reported.
+jcode_silent_stop_check() {  # <window> <task> <tail40>
+  local win=$1 task=$2 tail40=$3 statusf marker reason size notice
+  [ "$(window_harness "$win")" = jcode ] || return 0
+  statusf="$STATE/$task.status"
+  status_is_captain_relevant "$(last_status_line "$statusf")" && return 0
+  # Only the TUI's own warning line counts, so a worker that merely prints or
+  # edits the phrase is not mistaken for a stopped one.
+  notice=$(printf '%s\n' "$tail40" | grep '^[[:space:]]*⚠ Stream stalled' | tail -n 1 || true)
+  [ -n "$notice" ] || return 0
+  reason=$(fm_jcode_silent_stop_reason "$notice") || return 0
+  marker="$STATE/.jcode-stopped-$(window_key "$win")"
+  size=$(wc -c < "$statusf" 2>/dev/null || echo 0)
+  size=${size//[[:space:]]/}
+  [ "$(cat "$marker" 2>/dev/null || true)" != "$size" ] || return 0
+  fm_jcode_report_blocked "$STATE" "$task" "$reason" || return 0
+  size=$(wc -c < "$statusf" 2>/dev/null || echo 0)
+  printf '%s' "${size//[[:space:]]/}" > "$marker"
+  triage_log "jcode silent stop recorded as blocked: $win"
+}
+
+# jcode_status_size: the byte length of <task>'s status log, the marker value
+# that says which log state a stale wake already surfaced.
+jcode_status_size() {  # <task>
+  local size
+  size=$(wc -c < "$STATE/$1.status" 2>/dev/null || echo 0)
+  printf '%s' "${size//[[:space:]]/}"
+}
+
+# jcode_note_surfaced: remember that a stale wake just reported this jcode
+# worker's current log state, for jcode_finished_idle_churn.
+jcode_note_surfaced() {  # <window> <task> <window-key>
+  [ "$(window_harness "$1")" = jcode ] || return 0
+  jcode_status_size "$2" > "$STATE/.jcode-surfaced-$3"
+}
+
+# jcode_finished_idle_churn: 0 iff a jcode worker is finished and only its pane
+# is moving: its own turn hooks (the jcode-hook busy source) say idle, its latest
+# status is done, and that exact log state was already surfaced by a stale wake.
+# The idle TUI keeps redrawing timers and usage widgets, so a changed pane hash
+# alone carries no news. A busy or unknown verdict never matches, and a new
+# status line changes the log size, so a genuinely wedged busy worker and any
+# real change keep their normal handling.
+jcode_finished_idle_churn() {  # <window> <task> <window-key>
+  local win=$1 task=$2 key=$3 record verb
+  [ "$(window_harness "$win")" = jcode ] || return 1
+  record=$(fm_busy_record_read "$STATE" "$task") || return 1
+  case "$record" in "idle jcode-hook "*) ;; *) return 1 ;; esac
+  status_line_verb "$(last_status_line "$STATE/$task.status")" verb
+  [ "$verb" = "done" ] || return 1
+  [ "$(cat "$STATE/.jcode-surfaced-$key" 2>/dev/null || true)" = "$(jcode_status_size "$task")" ]
 }
 
 # busy_turn_over_age: 0 iff the last completed turn or explicit native-harness
@@ -3266,6 +3395,10 @@ EOF
     # content cannot suppress stale detection. Read once per window per poll and
     # reused below so a busy verdict is consistent within one cycle.
     if window_is_busy "$w" "$tail40"; then busy_now=0; else busy_now=1; fi
+    if [ -n "$task" ] && [ "$kind" != secondmate ]; then
+      [ "$busy_now" -eq 0 ] || jcode_silent_stop_check "$w" "$task" "$tail40"
+      noprogress_check "$w" "$task" "$key" "$busy_now" "$kind"
+    fi
     if [ "$h" = "$prev" ]; then
       n=$(( $(cat "$cf" 2>/dev/null || echo 0) + 1 ))
       echo "$n" > "$cf"
@@ -3306,7 +3439,10 @@ EOF
           # authoritative source fm-crew-state.sh itself already prioritizes
           # over the log) a chance to override before trusting the log.
           if [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
-            if crew_is_provably_working "$(window_to_task "$w" "$STATE")"; then
+            if jcode_finished_idle_churn "$w" "$task" "$key"; then
+              printf '%s' "$h" > "$sf"
+              triage_log "absorbed stale (finished jcode worker idle per its turn hooks, pane redraw only): $w"
+            elif crew_is_provably_working "$(window_to_task "$w" "$STATE")"; then
               printf '%s' "$h" > "$sf"
               date +%s > "$ssf"
               clear_write_tracking "$key"
@@ -3337,6 +3473,7 @@ EOF
                 *) stale_end=''; stale_ident='' ;;
               esac
               mark_surfaced "$stale_status" "$stale_end" "$stale_ident"
+              jcode_note_surfaced "$w" "$task" "$key"
               wake "$stale_reason"
             fi
           elif [ -e "$ssf" ]; then

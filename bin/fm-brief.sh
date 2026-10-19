@@ -666,6 +666,16 @@ IFS= read -r -d '' SHARED_INFRA_RULE <<'EOF' || true
 EOF
 SHARED_INFRA_RULE=${SHARED_INFRA_RULE%$'\n'}
 
+# The decide-and-move rule for ship and scout workers (not the secondmate
+# charter): a worker that re-deliberates settled choices is the no-progress
+# case bin/fm-watch.sh nudges and then reports.
+IFS= read -r -d '' DECIDE_RULE <<'EOF' || true
+8. Decide and move: take the first workable approach, and do not revisit a choice once settled.
+   If you stay torn between options for more than about 10 minutes, append `needs-decision` instead of deliberating.
+   If firstmate nudges you to commit to an approach, pick one and start editing.
+EOF
+DECIDE_RULE=${DECIDE_RULE%$'\n'}
+
 if [ -n "$BASE_BRANCH" ]; then
   SETUP_BASE="You are in a disposable git worktree of $REPO, at a detached HEAD on a clean copy of its base branch.
 Base branch: $BASE_BRANCH"
@@ -713,6 +723,7 @@ $CREWMATE_PAUSE_INSTRUCTIONS
    A decision or blocker you opened stays open until a \`resolved\` line carrying its exact key lands; a later \`done:\` or \`working:\` line never closes it, even when the answer is what started that work.
    Firstmate's reply normally writes that closing line at answer time; when a blocker or wait clears WITHOUT a firstmate reply, append \`resolved [at=<epoch>]: {how it cleared}\` yourself (same \`[key=<slug>]\` if you opened it with one) as you resume.
 $SHARED_INFRA_RULE
+$DECIDE_RULE
 
 $WAIT_BLOCK$INBOX_SECTION
 
@@ -793,6 +804,7 @@ $ASK_USER_BLOCK
    A decision or blocker you opened stays open until a \`resolved\` line carrying its exact key lands; a later \`done:\` or \`working:\` line never closes it, even when the answer is what started that work.
    Firstmate's reply normally writes that closing line at answer time; when a blocker or wait clears WITHOUT a firstmate reply, append \`resolved [at=<epoch>]: {how it cleared}\` yourself (same \`[key=<slug>]\` if you opened it with one) as you resume.
 $SHARED_INFRA_RULE
+$DECIDE_RULE
 
 $WAIT_BLOCK$INBOX_SECTION
 

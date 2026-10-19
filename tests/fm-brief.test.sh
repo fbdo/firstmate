@@ -621,6 +621,25 @@ test_ask_user_escalation_format() {
 # CLAUDE.md to corrections of factually wrong information - including wrong
 # information the task itself introduced - and never invites additions of
 # missing knowledge, because those files tax every agent session of the project.
+test_decide_and_move_rule_is_in_ship_and_scout_briefs() {
+  local home id brief rule_lines
+  home="$TMP_ROOT/decide-move-home"
+  mkdir -p "$home/data"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-decide-ship some-proj --mode no-mistakes >/dev/null 2>&1
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-decide-scout some-proj --scout >/dev/null 2>&1
+  for id in brief-decide-ship brief-decide-scout; do
+    brief="$home/data/$id/brief.md"
+    assert_present "$brief" "$id was not scaffolded"
+    assert_grep "Decide and move: take the first workable approach, and do not revisit a choice once settled." "$brief" \
+      "$id lost the decide-and-move rule"
+    assert_grep "torn between options for more than about 10 minutes, append \`needs-decision\`" "$brief" \
+      "$id lost the needs-decision time box"
+    rule_lines=$(awk '/^8\. Decide and move/ {on=1; n=1; next} on && /^   / {n++; next} on {on=0} END {print n+0}' "$brief")
+    [ "$rule_lines" -le 3 ] || fail "$id decide-and-move rule is $rule_lines lines, not three or fewer"
+  done
+  pass "fm-brief.sh: ship and scout briefs carry the three-line decide-and-move rule"
+}
+
 test_ship_project_memory_wording() {
   local home id brief
   home="$TMP_ROOT/project-memory-home"
@@ -1644,6 +1663,7 @@ test_no_mistakes_dod_green_detection
 test_pr_based_dod_requires_non_draft
 test_ask_user_escalation_format
 test_ship_project_memory_wording
+test_decide_and_move_rule_is_in_ship_and_scout_briefs
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
 test_herdr_lab_omission_is_loud_for_ship_and_scout

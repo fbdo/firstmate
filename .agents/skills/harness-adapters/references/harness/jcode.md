@@ -43,6 +43,8 @@ A jcode crewmate or scout is a daemon session in the task worktree; its pane onl
 | Need | Mechanism |
 |---|---|
 | Busy state | `turn_start` records busy and `turn_end` records idle plus the turn-ended notification, through `../../../bin/fm-jcode-hook.sh` for the bound session in its own worktree only; a cancelled turn fires `turn_end` too. |
+| Silent stops | A turn that ends in error on an auth failure (`token is expired and refresh failed`, `invalid_grant`) or on the roughly 12.5 minute stream-idle cancellation (`Stream stalled ... Processing cancelled`, `[provider] stream_idle_timeout_secs`) leaves no status line. `../../../bin/fm-jcode-hook.sh` reads `JCODE_HOOK_STATUS=error` with `JCODE_HOOK_ERROR` at turn_end, and `../../../bin/fm-watch.sh` reads the pane warning, and both append a plain `blocked` line through `../../../bin/fm-jcode-lib.sh`, which wakes firstmate. |
+| Finished-pane redraw | An idle jcode TUI keeps redrawing timers and usage widgets, so for a worker whose jcode-hook busy source is idle and whose latest status is `done` and already surfaced, a changed pane hash alone is not re-raised as stale (`../../../bin/fm-watch.sh`). |
 | Steering | `../../../bin/fm-send.sh`'s ordinary doorbell typed into the TUI composer; the composer reads `unknown` (its prompt is `N>`), which the doorbell tolerates. |
 | Interrupt | API `cancel`, repeated on one attached connection until the turn reports done, because a cancel from a connection that did not start the turn is cleared 500 ms later and can lose that race. |
 | Exit | Cancel any running turn through the API, then SIGTERM the proven client, which exits cleanly and leaves the idle session resumable. Nothing is typed. |

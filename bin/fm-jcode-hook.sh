@@ -86,6 +86,12 @@ EOF
     else
       "$SCRIPT_DIR/fm-busy-event.sh" apply "$STATE" "$TASK_ID" idle --gen "$TASK_GEN" \
         --source jcode-hook --event turn-end --turn-ended >/dev/null 2>&1 || true
+      # A turn that ended in error on an auth failure or stream-idle cancel is a
+      # silent stop: record it as blocked so firstmate is woken with the reason.
+      if [ "${JCODE_HOOK_STATUS:-}" = error ] \
+        && STOP_REASON=$(fm_jcode_silent_stop_reason "${JCODE_HOOK_ERROR:-}"); then
+        fm_jcode_report_blocked "$STATE" "$TASK_ID" "$STOP_REASON" || true
+      fi
     fi
     exit 0
   fi

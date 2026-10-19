@@ -228,3 +228,39 @@ fm_jcode_model_listed() {  # <jcode-bin> <model>
   echo "error: jcode model '$model' is not listed by 'jcode --quiet model list --json'; choose a listed id or omit --model" >&2
   return 1
 }
+
+# Classify the text a jcode turn left behind (the turn_end hook's error field,
+# or the worker pane's tail) as a silent stop: a turn that ended on an auth
+# failure or on the stream-idle cancellation, with nothing for the worker's own
+# status log to say. Prints one plain reason and returns 0, or returns 1 when
+# the text shows neither. Verified wording, jcode v0.98.1: the provider error
+# "Claude OAuth token is expired and refresh failed ... invalid_grant" and the
+# TUI notice "Stream stalled (no response for ...). Processing cancelled." (the
+# roughly 12.5 minute stream-idle timeout, [provider] stream_idle_timeout_secs).
+fm_jcode_silent_stop_reason() {  # <text>
+  local text=$1
+  case "$text" in
+    *"Stream stalled"*|*"Processing cancelled"*)
+      printf '%s\n' "jcode cancelled the turn after its stream went idle (stream-idle timeout), so the worker stopped without reporting"
+      return 0
+      ;;
+    *"token is expired and refresh failed"*|*"token refresh failed"*|*"Token refresh failed"*|*invalid_grant*|*"Failed to refresh"*"OAuth token"*|*"authentication failed"*|*"/login"*"re-authenticate"*)
+      printf '%s\n' "jcode could not authenticate (login or token refresh failed), so the worker stopped without reporting"
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+# Record a silent stop as a `blocked` event in <state>/<id>.status so the
+# watcher's ordinary status signal wakes firstmate with the plain reason.
+# Idempotent: nothing is appended when the log's last line already carries this
+# reason. Used by the turn_end hook (a turn that ended in error) and by the
+# watcher (the pane shows the stream-idle notice). Returns 0 when it appended.
+fm_jcode_report_blocked() {  # <state-dir> <id> <reason>
+  local f="$1/$2.status" last
+  [ -n "$3" ] || return 1
+  last=$(tail -n 1 "$f" 2>/dev/null || true)
+  case "$last" in *"$3"*) return 1 ;; esac
+  printf 'blocked [at=%s]: %s\n' "$(date +%s)" "$3" >> "$f"
+}
