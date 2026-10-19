@@ -583,6 +583,11 @@ inbox_steer_check() {  # <window> <task>
   tail40=$WATCHER_CAPTURE
   if window_is_busy "$w" "$tail40"; then
     [ "$verb" != retry ] || return 0
+    # A native jcode worker's doorbell is a soft interrupt, which the daemon
+    # holds and the worker reads at its next tool boundary, so a busy turn is
+    # the normal wait for it and is not a stuck worker. Busy deferral spends no
+    # budget there; a dead or missing endpoint still escalates above.
+    [ "$backend" != jcode ] || return 0
     if ! count=$(fm_task_inbox_record_busy "$STATE" "$task" "$rec"); then
       [ -f "$rec" ] || return 0
       reason="stale: $w (steering-inbox busy bookkeeping unwritable: ${rec%/*}/.busy-state cannot be written while $rec stays unhandled; inspect the inbox directory)"

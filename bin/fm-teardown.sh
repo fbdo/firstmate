@@ -3665,6 +3665,15 @@ fi
 # pruned code root. Best effort - a sweep failure never blocks this teardown.
 "$SCRIPT_DIR/fm-remote-job-reap-orphans.sh" >&2 || true
 
+# A native jcode worker's view-only Herdr terminal (bin/fm-jcode-viewer.sh) is
+# closed first; it is only one more client of the session, so closing it never
+# affects the worker. Best effort.
+if [ -e "$STATE/$ID.jcode-viewer" ]; then
+  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CONFIG_OVERRIDE="$CONFIG" \
+    "$SCRIPT_DIR/fm-jcode-viewer.sh" close "$ID" >/dev/null 2>&1 || true
+  rm -f "$STATE/$ID.jcode-viewer"
+fi
+
 # Best-effort: drop the local task branch so the shared repo does not accumulate refs.
 if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   if [ "$ORCA_PATH_MATCH_VERIFIED" != 1 ]; then

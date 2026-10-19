@@ -731,6 +731,41 @@ test_watcher_waits_on_busy_pane() {
   pass "watcher: busy deferrals survive restart, escalate once at the bound, and never type"
 }
 
+# A native jcode worker takes the doorbell as a soft interrupt at its next tool
+# boundary, so a busy turn is its normal wait and must not spend the stuck-busy
+# budget. The backend seams are stubbed after sourcing the watcher; the budget
+# files, ladder, and escalation are the real ones.
+jcode_busy_steer_check() {  # <case-dir> <backend> <agent-state>
+  PATH="$1/fakebin:$PATH" FM_STATE_OVERRIDE="$1/state" FM_SEND_LOG="$1/send.log" \
+    FM_TASK_INBOX_GRACE_SECS=0 FM_TASK_INBOX_BUSY_MAX=2 FM_TEST_BACKEND="$2" FM_TEST_AGENT_STATE="$3" \
+    bash -c '. "$1"
+      window_backend() { printf "%s" "$FM_TEST_BACKEND"; }
+      fm_backend_agent_state() { printf "%s" "$FM_TEST_AGENT_STATE"; }
+      watcher_capture() { WATCHER_CAPTURE=; }
+      window_is_busy() { return 0; }
+      window_label() { printf "t1"; }
+      inbox_steer_check sess:fm-t1 t1' _ "$WATCH" > "$1/check.out" 2>&1
+}
+
+test_native_jcode_busy_deferral_never_counts() {
+  local dir i
+  dir=$(busy_case jcodebusy)
+  for i in 1 2 3 4; do jcode_busy_steer_check "$dir" jcode alive; done
+  [ ! -s "$dir/state/.wake-queue" ] || fail "busy turns on a native jcode worker must not raise stuck-busy:"$'\n'"$(cat "$dir/state/.wake-queue")"
+  [ ! -s "$dir/send.log" ] || fail "a busy native worker must not be typed into"
+  [ -f "$dir/state/t1.inbox/001.msg" ] || fail "the steer must stay in the inbox"
+  [ ! -e "$dir/state/t1.inbox/.busy-state" ] || fail "a native jcode worker must spend no busy budget"
+  # A non-jcode backend with the same inputs still escalates, so the exemption is scoped.
+  dir=$(busy_case jcodebusy-control)
+  for i in 1 2; do jcode_busy_steer_check "$dir" tmux alive; done
+  grep -q 'stuck-busy' "$dir/state/.wake-queue" || fail "a pane worker must still escalate stuck-busy at the bound"
+  # A dead native endpoint still escalates directly.
+  dir=$(busy_case jcodebusy-dead)
+  jcode_busy_steer_check "$dir" jcode dead
+  [ -s "$dir/state/.wake-queue" ] || fail "a dead native jcode endpoint must still escalate"
+  pass "watcher: busy deferral never counts toward stuck-busy for a native jcode worker, other backends still escalate, a dead endpoint still escalates"
+}
+
 test_watcher_busy_budget_resets_on_ring_and_ack() {
   local dir rec
   dir=$(busy_case busy-reset)
@@ -1198,6 +1233,7 @@ test_fire_and_forget_retry_is_quiet_without_the_flag
 test_ring_ladder_policy
 test_watcher_rerings_idle_pane_quietly
 test_watcher_waits_on_busy_pane
+test_native_jcode_busy_deferral_never_counts
 test_watcher_busy_budget_resets_on_ring_and_ack
 test_watcher_busy_bookkeeping_failure_surfaces
 test_watcher_successor_busy_reset_failure_surfaces idle
