@@ -205,6 +205,9 @@ function connect(onFrame, onClose) {
         sock.write(`${JSON.stringify({ v: 1, id, ...req })}\n`);
       });
     },
+    send(req) {
+      if (!closed) sock.write(`${JSON.stringify({ v: 1, id: nextId++, ...req })}\n`);
+    },
     close() {
       sock.destroy();
     },
@@ -241,6 +244,7 @@ function onEvent(session, frame) {
       markBusy(session);
       break;
     case "session_status":
+      if (holders.get(session)) holders.get(session).status = frame.status;
       if (frame.status === "running") markBusy(session);
       else if (frame.status === "idle") markIdle(session, null);
       break;
@@ -314,10 +318,62 @@ async function attach(session, h) {
   h.conn = conn;
   h.attempts = 0;
   h.attaching = false;
+  const priorLive = readLive(session);
   // Memory-off is not durable once nothing holds the session (G6): re-apply on every attach.
   await conn.request({ req: "runtime_command", session_id: session, command: "memory", args: ["off"] });
-  if (!readLive(session) || readLive(session) === "unknown") setLive(session, "idle");
   log(`attached ${session}`);
+  // A turn the keeper last saw busy (or lost track of) may have been abandoned by a restart.
+  if (priorLive === "busy" || priorLive === "unknown" || h.recovery) {
+    await new Promise((r) => setTimeout(r, Number(process.env.FM_JCODE_KEEPER_SETTLE_MS || 300)));
+    await reconcile(session, h, priorLive);
+  }
+  if (!readLive(session) || readLive(session) === "unknown") setLive(session, "idle");
+}
+
+const TERMINAL = new Set(["done", "failed", "blocked", "needs-decision", "paused"]);
+function lastStatusState(id) {
+  try {
+    const lines = fs.readFileSync(path.join(STATE, `${id}.status`), "utf8").split("\n").filter(Boolean);
+    return (lines.pop() || "").split(/[ \[:]/)[0];
+  } catch {
+    return "";
+  }
+}
+
+// D6: detect an abandoned turn (idle, history ends on a user row, the task has
+// not reported a terminal state) and re-prompt exactly once per abandoned turn.
+async function reconcile(session, h, priorLive) {
+  h.recovery = false;
+  if (!h.conn || h.status === "running") return;
+  const reply = await h.conn.request({ req: "get_history", session_id: session });
+  if (!reply || reply.ev !== "history") return;
+  const rows = reply.messages || [];
+  const last = rows[rows.length - 1];
+  if (!last || last.role !== "user") {
+    if (priorLive !== "idle") setLive(session, "idle");
+    return;
+  }
+  if (TERMINAL.has(lastStatusState(h.id))) {
+    setLive(session, "idle");
+    return;
+  }
+  const count = rows.length;
+  const marker = path.join(RECOVERED, session);
+  let recorded = null;
+  try {
+    recorded = Number(fs.readFileSync(marker, "utf8").trim());
+  } catch {
+    // Never recovered.
+  }
+  setLive(session, "idle");
+  if (recorded !== null && count <= recorded + 1) {
+    transition(session, "working", "blocked", "turn abandoned twice after restart");
+    log(`session ${session} abandoned twice; not re-prompting`);
+    return;
+  }
+  fs.writeFileSync(marker, `${count}\n`);
+  log(`session ${session} abandoned at history ${count}; re-prompting once`);
+  h.conn.send({ req: "send_message", session_id: session, content: RECOVERY_TEXT });
 }
 
 // ---- children discovery (D13) ---------------------------------------------

@@ -208,3 +208,53 @@ test_memory_resent_after_reconnect
 test_children_recorded
 test_never_attaches_unrecorded
 test_keeper_idle_exit
+
+# ---- step 5: crashed-turn recovery -------------------------------------------
+reprompt_count() { grep -c 'infrastructure restart' "$DDIR/requests.log"; }
+
+test_crash_recovery_once_then_blocked() {
+  local sid before
+  keeper "$FMH" stop >/dev/null
+  rm -f "$FMH/state/t1.jcode-session" "$FMH/state/t2.jcode-session" "$FMH/state/t2.jcode-exited"
+  keeper "$FMH" ensure --no-keeper >/dev/null || fail "ensure failed"
+  sid=$(api create "$TMP_ROOT" --model m1) || fail "create failed"
+  bind_task t3 "$sid"
+  keeper "$FMH" ensure >/dev/null || fail "ensure failed"
+  wait_for "attached" test -f "$JS/live/$sid"
+  printf '{"hold":true}' >"$DDIR/script.json"
+  printf 'long job' | api send "$sid" || fail "send failed"
+  wait_for "busy" live_is "$sid" busy
+  before=$(reprompt_count)
+  dctl "drop"
+  wait_for "one re-prompt" bash -c "[ \$(grep -c 'infrastructure restart' '$DDIR/requests.log') -gt $before ]"
+  [ -s "$JS/recovered/$sid" ] || fail "a recovered marker must be written"
+  grep -q "Firstmate: your previous turn was interrupted" "$DDIR/requests.log" || fail "the re-prompt must say it is Firstmate"
+  # The re-prompt turn is held too; a second crash of the recovery must block, not loop.
+  sleep 0.8
+  dctl "drop"
+  wait_for "blocked after the second crash" grep -q "turn abandoned twice after restart" "$JS/transitions"
+  sleep 1
+  [ "$(reprompt_count)" -eq $((before + 1)) ] || fail "exactly one automatic re-prompt, got $(( $(reprompt_count) - before ))"
+  rm -f "$DDIR/script.json"
+  pass "a crashed turn gets exactly one re-prompt; a second crash is recorded blocked"
+}
+
+test_terminal_status_is_not_recovered() {
+  local sid before
+  sid=$(api create "$TMP_ROOT" --model m1) || fail "create failed"
+  bind_task t4 "$sid"
+  printf 'done [at=1]: finished\n' >"$FMH/state/t4.status"
+  wait_for "attached" test -f "$JS/live/$sid"
+  printf '{"hold":true}' >"$DDIR/script.json"
+  printf 'work' | api send "$sid" || fail "send failed"
+  wait_for "busy" live_is "$sid" busy
+  before=$(reprompt_count)
+  dctl "drop"
+  sleep 2
+  [ "$(reprompt_count)" -eq "$before" ] || fail "a task that already reported done must not be re-prompted"
+  rm -f "$DDIR/script.json" "$FMH/state/t4.jcode-session"
+  pass "a turn abandoned after a terminal status is not re-prompted"
+}
+
+test_crash_recovery_once_then_blocked
+test_terminal_status_is_not_recovered
