@@ -51,7 +51,8 @@ A jcode crewmate or scout is a daemon session in the task worktree; its pane onl
 | Relaunch | A fresh session in the recorded worktree and endpoint, through the same spawn path. |
 | Model and effort | Applied at creation; both persist with the session. While a client holds a session, another connection's attach reports the daemon's default effort, so that report is no reading of a held session. |
 
-Tool commands run under the shared daemon, never under the pane, so the pane's launch environment does not reach them: the commit-trailer strip hook (`../../../bin/fm-git-strip-ai-trailers.sh`) does not apply to a jcode worker's commits, and a `forge=external` ship, whose push guard rides that environment, is refused.
+Tool commands run under the shared daemon, never under the pane, so the pane's launch environment does not reach them. The spawn therefore records the per-task hooks directory (commit-trailer strip, plus the push guard of a `forge=external` ship) in the worktree's own git config through `../../../bin/fm-git-strip-ai-trailers.sh install --worktree-config`, which covers pane and native workers alike, and cleanup removes it again with `uninstall-worktree` before the worktree returns to its pool.
+A `forge=external` ship is therefore allowed on jcode.
 `tests/fm-jcode-harness.test.sh` pins the worker contracts portably, and `tests/fm-jcode-signals-live-e2e.test.sh` (opt-in `FM_JCODE_SIGNALS_LIVE=1`, spends tokens) drives them live on an isolated Herdr lab and a private daemon; `../../../docs/verification/jcode.md` records the evidence.
 
 ## Primary integration
@@ -65,3 +66,23 @@ Away and quiet postures (`/afk`, `/quiet`) and the supervision host are not veri
 ## Native runtime backend
 
 `config/jcode-runtime=native` (or `--backend jcode`) runs a jcode crewmate or scout as a session on the shared jcode daemon with no pane. The spawn leases a Treehouse worktree, creates the session through this home's API bridge with an explicit model, titles it `fm:<task>`, waits for the keeper to attach, sends the brief, and reads readiness from the keeper's first busy record. Steering is a soft interrupt, interrupt is `cancel`, exit records `state/<task>.jcode-exited`, and relaunch re-prompts the same session. Firstmate never starts or stops the shared daemon, and every mutating call first proves the session is owned by this home. `../../../docs/jcode-backend.md` owns the full contract.
+
+## Secondmate
+
+A jcode secondmate is a pane-attached session on the one shared daemon: the Phase 1 pane launch, reused for `kind=secondmate`, with the secondmate home as the session's working directory and `jcode --resume <session>` running in the mate's own Herdr or tmux pane.
+It needs a model: `config/secondmate-harness` must read `jcode <model> [<effort>]`, and a spawn without one refuses, because the daemon default for API sessions is unpredictable.
+Native `backend=jcode` and remote routes stay refused for secondmates (`jcode secondmates are local-only`).
+The session is bound in the parent's `state/<id>.jcode-session` and titled `fm:<id>`; the live TUI client is the mate's session-lock anchor and retains its turns, so no keeper serves it.
+The pane's launch environment never reaches the mate's tool shells, so `FM_HOME` falls back to the mate's own checkout, and the spawn refuses a shared daemon whose own environment carries `FM_HOME` or an `FM_*_OVERRIDE` (`fm_jcode_daemon_env_clean`).
+The machine-global hook names only the parent's dispatcher, which delegates to the mate's own `bin/fm-jcode-hook.sh` for the mate's session and for sessions bound in the mate's `state/`; the parent records the mate busy without a turn-ended notification and applies no worker fence to it.
+`bin/fm-jcode-setup.sh status` in a mate home reports registered when the parent's dispatcher is registered and the parent records that home as a jcode secondmate; `install` there refuses.
+Recovery relaunches a fresh session through `fm-spawn.sh <id> --secondmate` and archives the previous session only after the new one reports ready.
+The parent never mutates a session bound only in the mate's `state/`.
+`tests/fm-jcode-secondmate.test.sh` and the secondmate cases of `tests/fm-jcode-harness.test.sh` pin this portably.
+
+## Opt-in extras
+
+- `config/jcode-worker-memory` (`on`) keeps jcode memory on for workers; the default is off for every jcode crewmate and scout, applied by the keeper on each attach (native) and after the pane client attaches (pane).
+- `config/jcode-viewer` (`off`) skips the view-only Herdr terminal that `bin/fm-jcode-viewer.sh` opens for each native worker and cleanup closes.
+- `config/jcode-usage-evidence` (presence) enables `bin/fm-jcode-usage.sh`.
+`../../../docs/jcode-backend.md` owns these contracts.

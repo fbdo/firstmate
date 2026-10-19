@@ -53,6 +53,8 @@ Below-floor is rare: bootstrap enforces `FM_QUOTA_AXI_MIN` and normally reports 
 `--json` is a defensive belt, not a habit; never reach for it because it feels more complete.
 Read `quota-axi auth --json` only when a candidate's credential surface is in question.
 
+For a `jcode:<model>` candidate whose provider row in `quota-axi` is missing or `unresolved_windows`, the agent may read `bin/fm-jcode-usage.sh` (active only when `config/jcode-usage-evidence` exists) as disclosed supplementary evidence; it never replaces `quota-axi`, never yields a `spendPriority`, and never blocks a candidate by itself.
+
 For each candidate, preserve explicit `harness`, `model`, and `provider`; `harness-adapters` owns identity, and model/provider never infer harness.
 
 ## Three gates, then spendPriority

@@ -874,10 +874,11 @@ It has no primary or secondmate supervision protocol.
 The launch generates a private per-task config directory that mirrors the operator's provider/model configuration and enforces unattended permissions without modifying global configuration.
 The first-start license dialog requires an operator decision and is never accepted automatically.
 
-jcode is verified as a primary and for crewmate and scout launches, on the tmux and Herdr backends and on the native `jcode` backend ([`docs/jcode-backend.md`](jcode-backend.md)); a secondmate launch is refused because only the worker lifecycle is built.
+jcode is verified as a primary and for crewmate and scout launches, on the tmux and Herdr backends and on the native `jcode` backend ([`docs/jcode-backend.md`](jcode-backend.md)); a secondmate launch is refused until the live end-to-end proof of the pane-attached secondmate shape passes ([`docs/jcode-backend.md`](jcode-backend.md) "Secondmates").
+Optional jcode flags under `config/`, all absent by default: `jcode-worker-memory` (`on` keeps jcode memory on for workers; inherited into secondmate homes), `jcode-viewer` (`off` skips the view-only Herdr terminal of a native worker), and `jcode-usage-evidence` (presence enables `bin/fm-jcode-usage.sh`); `jcode-runtime` is inherited into secondmate homes. [`docs/jcode-backend.md`](jcode-backend.md) owns them.
 A jcode worker needs this home's hook dispatcher registered for `turn_start` and `turn_end` (`bin/fm-jcode-setup.sh install`, checked by `bin/fm-jcode-setup.sh status`), because those hooks are its busy source and the spawn fails without them.
 A jcode turn that ends on an auth failure or a stream-idle cancellation is recorded as a `blocked` status so the watcher wakes firstmate with the plain reason, and a finished jcode worker whose turn hooks say idle is not re-raised as stale when only its pane redraws.
-Its tool commands run under the shared jcode daemon rather than the pane, so the pane-borne commit-trailer strip hook does not reach them and a `forge=external` ship, whose push guard rides the pane, is refused on jcode.
+Its tool commands run under the shared jcode daemon rather than the pane, so the spawn records the commit-trailer strip and push guard hooks in the worktree's own git config instead of the pane environment.
 [Its adapter reference](../.agents/skills/harness-adapters/references/harness/jcode.md) owns the operating contract and [its verification record](verification/jcode.md) owns the live evidence.
 
 ### Verification and primary supervision
