@@ -61,3 +61,7 @@ The dispatcher ignores every session whose working directory is not this home, s
 `tests/fm-jcode-harness.test.sh` is the portable regression.
 `../../../docs/verification/supervision.md` under "jcode primary hooks" records the live evidence; there is no automated live guard yet.
 Away and quiet postures (`/afk`, `/quiet`) and the supervision host are not verified on a jcode primary; jcode is outside the supervision host's primary list, so `/afk` falls back to the daemon path, whose supervisor injection has not been exercised against a jcode pane.
+
+## Native runtime backend
+
+`config/jcode-runtime=native` (or `--backend jcode`) runs a jcode crewmate or scout as a session on the shared jcode daemon with no pane. The spawn leases a Treehouse worktree, creates the session through this home's API bridge with an explicit model, titles it `fm:<task>`, waits for the keeper to attach, sends the brief, and reads readiness from the keeper's first busy record. Steering is a soft interrupt, interrupt is `cancel`, exit records `state/<task>.jcode-exited`, and relaunch re-prompts the same session. Firstmate never starts or stops the shared daemon, and every mutating call first proves the session is owned by this home. `../../../docs/jcode-backend.md` owns the full contract.

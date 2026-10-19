@@ -421,6 +421,9 @@ For spawn-capable adapters, the runtime session-provider backend controls where 
 | `zellij` | Experimental; no dedicated real-backend CI lane | [`docs/zellij-backend.md`](zellij-backend.md) |
 | `orca` | Experimental; no dedicated real-backend CI lane | [`docs/orca-backend.md`](orca-backend.md) |
 | `cmux` | Experimental; no dedicated real-backend CI lane | [`docs/cmux-backend.md`](cmux-backend.md) |
+| `jcode` | Experimental native runtime for the jcode harness only; portable tests, opt-in live e2e | [`docs/jcode-backend.md`](jcode-backend.md) |
+
+The native `jcode` backend is never auto-detected. `config/jcode-runtime` holds `pane` (default) or `native`; with `native`, a jcode crewmate or scout spawned with no explicit backend runs as a session on the shared jcode daemon (`backend=jcode`, `window=jcode:<session>`, meta keys `jcode_session`, `jcode_socket`, `jcode_api_socket`). An explicit `--backend jcode` or `FM_BACKEND=jcode` also selects it.
 
 Treehouse remains the worktree provider for tmux, herdr, zellij, and cmux, since herdr, zellij, and cmux are session providers only; Orca provides both the task worktree and terminal endpoint.
 
@@ -871,7 +874,7 @@ It has no primary or secondmate supervision protocol.
 The launch generates a private per-task config directory that mirrors the operator's provider/model configuration and enforces unattended permissions without modifying global configuration.
 The first-start license dialog requires an operator decision and is never accepted automatically.
 
-jcode is verified as a primary and for crewmate and scout launches, on the tmux and Herdr backends only; a secondmate launch is refused because only the worker lifecycle is built.
+jcode is verified as a primary and for crewmate and scout launches, on the tmux and Herdr backends and on the native `jcode` backend ([`docs/jcode-backend.md`](jcode-backend.md)); a secondmate launch is refused because only the worker lifecycle is built.
 A jcode worker needs this home's hook dispatcher registered for `turn_start` and `turn_end` (`bin/fm-jcode-setup.sh install`, checked by `bin/fm-jcode-setup.sh status`), because those hooks are its busy source and the spawn fails without them.
 A jcode turn that ends on an auth failure or a stream-idle cancellation is recorded as a `blocked` status so the watcher wakes firstmate with the plain reason, and a finished jcode worker whose turn hooks say idle is not re-raised as stale when only its pane redraws.
 Its tool commands run under the shared jcode daemon rather than the pane, so the pane-borne commit-trailer strip hook does not reach them and a `forge=external` ship, whose push guard rides the pane, is refused on jcode.
