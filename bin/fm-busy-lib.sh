@@ -44,6 +44,9 @@
 #   jcode-hook       jcode turn_start opens and turn_end closes, written by
 #                    bin/fm-jcode-hook.sh for the session bound to the task;
 #                    a cancelled turn also fires turn_end (verified live)
+#   jcode-keeper     the native jcode keeper (bin/fm-jcode-keeper.mjs) mirrors its
+#                    live busy/idle/unknown record for the session bound to a
+#                    native task, since the hook writes nothing for those
 #   codex-hook, codex-appserver  reserved: Codex, gated by
 #                    fm_busy_codex_semantic_source
 #   kimi-wire, kimi-hook  reserved: standalone Kimi, gated by fm_busy_kimi_verified
@@ -242,7 +245,7 @@ fm_busy_sources_for_harness() {  # <harness>
     devin) adapter=devin-hook ;;
     commandcode) adapter=commandcode-mod ;;
     polytoken) adapter=polytoken-hook ;;
-    jcode) adapter=jcode-hook ;;
+    jcode) adapter='jcode-hook jcode-keeper' ;;
     pi|pi-signed) adapter=pi-ext ;;
     omp) adapter=omp-ext ;;
     kimi*)

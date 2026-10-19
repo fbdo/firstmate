@@ -134,6 +134,7 @@ bind_task() {  # <task> <session>
   printf 'backend=jcode\nendpoint_task_id=%s\n' "$1" >"$FMH/state/$1.meta"
   printf 'session=%s\ngen=1\nworktree=/tmp/wt\n' "$2" >"$FMH/state/$1.jcode-session"
 }
+busy_state_is() { grep -q "state=$2 " "$FMH/state/$1.busy-state" 2>/dev/null; }
 live_is() { [ "$(cut -d' ' -f1 "$JS/live/$1" 2>/dev/null)" = "$2" ]; }
 memory_off_count() { grep -c '"args":\["off"\]' "$DDIR/requests.log"; }
 
@@ -143,12 +144,19 @@ test_keeper_attach_records_and_memory() {
   sid=$(api create "$TMP_ROOT" --model m1) || fail "create failed"
   SID1=$sid
   bind_task t1 "$sid"
+  # Arm the busy contract the way fm-spawn does (seed busy/fm-spawn) and bind its gen.
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$FMH/state" t1) || fail "arm failed"
+  printf 'session=%s\ngen=%s\nworktree=/tmp/wt\n' "$sid" "$gen" >"$FMH/state/t1.jcode-session"
   keeper "$FMH" ensure >/dev/null || fail "ensure (with keeper) failed"
   wait_for "live record" test -f "$JS/live/$sid"
   wait_for "memory off on attach" grep -q '"args":\["off"\]' "$DDIR/requests.log"
   printf 'go' | api send "$sid" || fail "send failed"
   wait_for "busy" live_is "$sid" busy
   wait_for "idle" live_is "$sid" idle
+  wait_for "busy-state settles idle" busy_state_is t1 idle
+  grep -q 'source=jcode-keeper' "$FMH/state/t1.busy-state" || fail "busy-state must come from the keeper"
+  bash -c '. "$1/bin/fm-busy-lib.sh"; fm_busy_classify jcode "jcode:x" jcode t1 "$2/state"' _ "$ROOT" "$FMH" | grep -q '^idle jcode-keeper' \
+    || fail "classifier must read idle for a finished native worker"
   grep -q "$(printf '\tjcode\t')" "$JS/transitions" || fail "transitions must carry normalized records"
   grep -q "working" "$JS/transitions" || fail "a working transition is recorded"
   pass "keeper attaches an owned session, applies memory off, records busy and idle"

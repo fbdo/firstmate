@@ -28,7 +28,7 @@
 import fs from "node:fs";
 import net from "node:net";
 import path from "node:path";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const HOME = process.env.FM_HOME || "";
@@ -107,6 +107,33 @@ process.on("SIGINT", () => releaseAndExit(0));
 const clean = (s) => String(s ?? "").replace(/[\t\r\n]+/g, " ");
 function setLive(session, value) {
   fs.writeFileSync(path.join(LIVE, session), `${value} ${now()}\n`);
+  mirrorBusy(session, value);
+}
+// The hook writes no busy record for a native task (its keeper owns busy/idle),
+// so every live change is mirrored into state/<id>.busy-state through the one
+// writer, bin/fm-busy-event.sh, bound to the gen the session record carries.
+// Best effort: a refused write (retired or stale gen) never breaks the keeper.
+function mirrorBusy(session, value) {
+  if (value !== "busy" && value !== "idle" && value !== "unknown") return;
+  const id = holders.get(session)?.id;
+  if (!id) return;
+  let gen = "";
+  try {
+    for (const line of fs.readFileSync(path.join(STATE, `${id}.jcode-session`), "utf8").split("\n")) {
+      if (line.startsWith("gen=")) gen = line.slice(4);
+    }
+  } catch {
+    return;
+  }
+  if (!gen) return;
+  try {
+    spawnSync(path.join(HERE, "fm-busy-event.sh"), ["apply", STATE, id, value, "--gen", gen, "--source", "jcode-keeper", "--event", value], {
+      stdio: "ignore",
+      timeout: 10000,
+    });
+  } catch (e) {
+    log(`busy-state mirror for ${id}: ${e?.message || e}`);
+  }
 }
 function readLive(session) {
   try {
