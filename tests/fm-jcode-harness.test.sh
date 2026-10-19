@@ -476,6 +476,10 @@ process.stdin.on("data", (d) => {
         log({ req: f.req, session: id, effort: f.effort });
         out({ reply_to: f.id, ev: "ok" });
         break;
+      case "rename_session":
+        log({ req: f.req, session: id, title: f.title });
+        out({ reply_to: f.id, ev: "ok" });
+        break;
       case "archive_session":
         log({ req: f.req, session: id });
         out({ reply_to: f.id, ev: "ok" });
@@ -814,8 +818,8 @@ EOF
   rec=$(make_jcode_spawn_case secondmate jcbad4)
   rc=0
   out=$(run_jcode_spawn "$rec" jcbad4 --secondmate 2>&1) || rc=$?
-  [ "$rc" -ne 0 ] || fail "a jcode secondmate must be refused"
-  pass "fm-spawn: jcode refuses unlisted models and secondmates, and fails loudly without an attached client or hooks"
+  [ "$rc" -ne 0 ] || fail "the harness helper's ship-style flags with --secondmate must still be refused"
+  pass "fm-spawn: jcode refuses unlisted models and a ship-flag secondmate (secondmate cases: fm-jcode-secondmate.test.sh), and fails loudly without an attached client or hooks"
 }
 
 # A tmux stub for the control plane: the pane runs jcode exactly while the
@@ -910,7 +914,7 @@ test_control_tables_name_jcode_a_worker_adapter() {
   [ "$(fm_control_harness_family jcode)" = jcode ] || fail "jcode must resolve to its own family"
   fm_control_harness_supports_kind jcode ship || fail "jcode must run ships"
   fm_control_harness_supports_kind jcode scout || fail "jcode must run scouts"
-  ! fm_control_harness_supports_kind jcode secondmate || fail "jcode must not run secondmates"
+  fm_control_harness_supports_kind jcode secondmate || fail "jcode must run secondmates (pane-attached)"
   [ "$(fm_control_interrupt_transport jcode)" = api ] || fail "jcode must interrupt through the API"
   ! fm_control_interrupt_key jcode >/dev/null || fail "jcode must have no interrupt key"
   [ "$(fm_control_harness_wiring_paths jcode /wt /state t1)" = /state/t1.jcode-session ] \
@@ -922,6 +926,96 @@ test_control_tables_name_jcode_a_worker_adapter() {
   pass "control and busy tables: jcode is a crewmate/scout adapter driven through the API and its hooks"
 }
 
+# A jcode secondmate (docs/jcode-backend.md "Secondmates"): a pane-attached
+# session on the shared daemon with the mate home as its working directory.
+make_jcode_secondmate_case() {  # <name> <id> -> "case|home|mate|mate|fakebin"
+  local name=$1 id=$2 rec dir home mate fb
+  rec=$(make_jcode_spawn_case "$name" "$id")
+  IFS='|' read -r dir home _ _ fb <<EOF
+$rec
+EOF
+  mate="$dir/mate"
+  mkdir -p "$mate/bin" "$mate/data" "$mate/state" "$mate/config" "$mate/projects"
+  printf '# Firstmate\n' > "$mate/AGENTS.md"
+  printf '%s\n' "$id" > "$mate/.fm-secondmate-home"
+  printf 'charter\n' > "$mate/data/charter.md"
+  printf '%s\n' 'projects/' 'state/' 'data/' 'config/' '.no-mistakes/' > "$mate/.gitignore"
+  git -C "$mate" init -q -b main
+  git -C "$mate" add -A >/dev/null 2>&1
+  git -C "$mate" commit -qm init >/dev/null 2>&1
+  printf '%s|%s|%s|%s|%s\n' "$dir" "$home" "$mate" "$mate" "$fb"
+}
+
+run_jcode_secondmate_spawn() {  # <case-record> <id> [spawn args...]
+  local dir home mate wt fb id=$2
+  IFS='|' read -r dir home mate wt fb <<EOF
+$1
+EOF
+  shift 2
+  env "${SCRUB[@]}" HOME="$home" FM_HOME="$home" FM_ROOT_OVERRIDE='' \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" JCODE_HOME="$dir/jhome" JCODE_SOCKET="$dir/jhome/run/jcode.sock" \
+    JCFAKE_TMUX_LOG="$dir/tmux.log" JCFAKE_LAUNCH_LOG="$dir/launch.log" JCFAKE_PANE_PATH="$mate" \
+    FAKE_JCODE_HOOK="$ROOT/bin/fm-jcode-hook.sh" FM_JCODE_DAEMON_ENVIRON_FILE="${FM_JCODE_DAEMON_ENVIRON_FILE:-/nonexistent}" \
+    FM_JCODE_READY_POLLS="${FM_JCODE_READY_POLLS:-40}" FM_JCODE_POLL_INTERVAL="${FM_JCODE_POLL_INTERVAL:-0.1}" \
+    PATH="$fb:$(dirname "$(command -v node)"):/usr/bin:/bin:/usr/sbin:/sbin" \
+    "$ROOT/bin/fm-spawn.sh" "$id" "$mate" --secondmate "$@" 2>&1
+}
+
+test_secondmate_spawn_on_jcode() {
+  local rec dir home mate wt fb id=jcsm1 out rc meta
+  command -v node >/dev/null 2>&1 || { pass "secondmate spawn: skipped (node unavailable)"; return; }
+  rec=$(make_jcode_secondmate_case smok "$id")
+  IFS='|' read -r dir home mate wt fb <<EOF
+$rec
+EOF
+  rc=0
+  out=$(run_jcode_secondmate_spawn "$rec" "$id" --harness jcode --model fake/good --effort low) || rc=$?
+  expect_code 0 "$rc" "a jcode secondmate spawn should succeed (output: $out)"
+  meta="$home/state/$id.meta"
+  assert_grep 'kind=secondmate' "$meta" "the record must say secondmate"
+  assert_grep 'harness=jcode' "$meta" "the record must name jcode"
+  assert_grep "home=$mate" "$meta" "the record must name the mate home"
+  assert_grep 'jcode_session=session_fake_1' "$meta" "the record must bind the created session"
+  assert_grep 'session=session_fake_1' "$home/state/$id.jcode-session" "the session record must name the session"
+  assert_grep "worktree=$mate" "$home/state/$id.jcode-session" "the session record must name the mate home"
+  assert_contains "$(cat "$dir/api.log")" "\"req\":\"create_session\",\"session\":\"session_fake_1\",\"working_dir\":\"$mate\"" \
+    "the session must be created in the mate home"
+  assert_contains "$(cat "$dir/api.log")" '"req":"rename_session"' "the session must be titled"
+  assert_contains "$(cat "$dir/launch.log")" "--resume 'session_fake_1' --no-update --no-selfdev" "the pane must resume the created session"
+  pass "fm-spawn: a jcode secondmate gets a session in its home, bound in the main state, titled, and resumed in its pane"
+
+  rec=$(make_jcode_secondmate_case nomodel jcsm2)
+  rc=0
+  out=$(run_jcode_secondmate_spawn "$rec" jcsm2 --harness jcode) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a jcode secondmate without a model must be refused"
+  assert_contains "$out" "needs an explicit model" "the refusal names the missing model"
+  IFS='|' read -r dir home mate wt fb <<EOF
+$rec
+EOF
+  [ "$(jc_requests "$dir" create_session)" -eq 0 ] || fail "a model-less refusal must precede session creation"
+
+  rec=$(make_jcode_secondmate_case envbad jcsm3)
+  IFS='|' read -r dir home mate wt fb <<EOF
+$rec
+EOF
+  printf 'FM_HOME=/somewhere\0' > "$dir/environ"
+  rc=0
+  out=$(FM_JCODE_DAEMON_ENVIRON_FILE="$dir/environ" run_jcode_secondmate_spawn "$rec" jcsm3 --harness jcode --model fake/good) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a daemon carrying FM_HOME must refuse the secondmate spawn"
+  assert_contains "$out" "restart it from a clean shell" "the refusal says how to fix it"
+  [ "$(jc_requests "$dir" create_session)" -eq 0 ] || fail "the env refusal must precede session creation"
+
+  rec=$(make_jcode_secondmate_case native jcsm4)
+  rc=0
+  out=$(run_jcode_secondmate_spawn "$rec" jcsm4 --harness jcode --model fake/good --backend jcode) || rc=$?
+  [ "$rc" -ne 0 ] || fail "backend=jcode must stay refused for secondmates"
+  assert_contains "$out" "does not support --secondmate" "the native backend refusal"
+  pass "fm-spawn: a jcode secondmate refuses without a model, with a polluted daemon environment, and on the native backend"
+}
+
+test_secondmate_spawn_on_jcode
 test_detection_is_anchored_and_markerless
 test_daemon_is_never_an_anchor_or_owner
 test_trusted_id_anchor_and_two_sessions

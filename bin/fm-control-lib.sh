@@ -110,8 +110,8 @@ fm_control_harness_family() {  # <recorded-harness>
 # Which task kinds an adapter is verified to run. muse, gemini, rovo, agy, devin,
 # commandcode, and polytoken are crewmate/scout adapters only: none has a primary
 # supervision protocol, and bin/fm-spawn.sh refuses a --secondmate launch on any of them.
-# jcode does run a primary, but only its crewmate/scout worker lifecycle is
-# verified, so a jcode secondmate is refused the same way. The control
+# jcode runs a primary and a pane-attached secondmate on the shared daemon, so it
+# supports every kind (its native backend=jcode still refuses secondmates in spawn). The control
 # plane asks this BEFORE it stops anything, so an incompatible relaunch target is
 # refused while the current agent is still running rather than after it has
 # been stopped.
@@ -119,7 +119,7 @@ fm_control_harness_supports_kind() {  # <harness> <kind>
   local harness=${1-} kind=${2-}
   fm_control_harness_supported "$harness" || return 1
   case "$harness" in
-    muse|gemini|rovo|agy|devin|commandcode|polytoken|jcode) [ "$kind" != secondmate ] || return 1 ;;
+    muse|gemini|rovo|agy|devin|commandcode|polytoken) [ "$kind" != secondmate ] || return 1 ;;
   esac
   return 0
 }

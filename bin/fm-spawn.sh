@@ -1180,6 +1180,12 @@ spawn_remote_secondmate() {
   fi
   case "$harness" in
   claude | codex | opencode | pi | pi-signed | grok | kimi | cursor) ;;
+  jcode)
+    fm_lock_release "$registry_lock" || true
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    echo "error: jcode secondmates are local-only; a remote secondmate cannot run on jcode" >&2
+    return 1
+    ;;
   *)
     fm_lock_release "$registry_lock" || true
     fm_lock_release "$SPAWN_TASK_LOCK" || true
@@ -2742,10 +2748,9 @@ esac
 # docs/supervision-protocols/ carries no Command Code wake protocol (1.74.1).
 # polytoken has none either: only the crewmate/scout lifecycle is verified;
 # docs/supervision-protocols/ carries no polytoken primary wake protocol.
-# jcode does have a primary protocol, but a secondmate launch on it is not
-# built: its launch shape (an API-created session plus an attached view) is
-# verified for crewmates and scouts only.
-if [ "$KIND" = secondmate ] && { [ "$HARNESS" = muse ] || [ "$HARNESS" = gemini ] || [ "$HARNESS" = agy ] || [ "$HARNESS" = devin ] || [ "$HARNESS" = commandcode ] || [ "$HARNESS" = polytoken ] || [ "$HARNESS" = jcode ]; }; then
+# jcode does have a primary protocol and runs a secondmate as a pane-attached
+# session on the shared daemon (docs/jcode-backend.md "Secondmates").
+if [ "$KIND" = secondmate ] && { [ "$HARNESS" = muse ] || [ "$HARNESS" = gemini ] || [ "$HARNESS" = agy ] || [ "$HARNESS" = devin ] || [ "$HARNESS" = commandcode ] || [ "$HARNESS" = polytoken ]; }; then
   echo "error: $HARNESS is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
   exit 1
 fi
@@ -2945,6 +2950,17 @@ if [ "$HARNESS" = agy ]; then
 fi
 if [ "$HARNESS" = jcode ] && [ -n "$MODEL" ] && [ "$MODEL" != default ]; then
   fm_jcode_model_listed "$JCODE_BIN" "$MODEL" || exit 1
+fi
+# A jcode secondmate needs an explicit model (the daemon default for API
+# sessions is unpredictable) and a shared daemon whose own environment cannot
+# redirect the mate's tool shells to another home (every tool shell is a child
+# of the daemon, so the launch prefix never reaches them).
+if [ "$HARNESS" = jcode ] && [ "$KIND" = secondmate ] && [ "$RAW_LAUNCH" -eq 0 ]; then
+  if [ -z "$MODEL" ] || [ "$MODEL" = default ]; then
+    echo "error: a jcode secondmate needs an explicit model; set config/secondmate-harness to 'jcode <model> [<effort>]' or pass --model" >&2
+    exit 1
+  fi
+  fm_jcode_daemon_env_clean || exit 1
 fi
 # polytoken's model validation composes firstmate's model and effort axes into
 # the launch model reference (bin/fm-polytoken-lib.sh owns the reasoning): the
@@ -5930,7 +5946,16 @@ EOF
       jcode_create_args=(create "$WT" --note "Firstmate worker session for task $ID. The launch brief follows as the next message.")
       [ -z "$MODEL" ] || [ "$MODEL" = default ] || jcode_create_args+=(--model "$MODEL")
       [ -z "$EFFORT" ] || [ "$EFFORT" = default ] || jcode_create_args+=(--effort "$EFFORT")
-      JCODE_SESSION=$(FM_JCODE_API_ALLOW_DEFAULT_MODEL=1 fm_jcode_api "${jcode_create_args[@]}") && [ -n "$JCODE_SESSION" ] || {
+      JCODE_PRIOR_SESSION=
+      if [ "$RELAUNCH" -eq 1 ] && [ "$KIND" = secondmate ]; then
+        JCODE_PRIOR_SESSION=$(fm_meta_get "$RELAUNCH_META" jcode_session)
+      fi
+      if [ "$KIND" = secondmate ]; then
+        JCODE_ALLOW_DEFAULT=
+      else
+        JCODE_ALLOW_DEFAULT=1
+      fi
+      JCODE_SESSION=$(FM_JCODE_API_ALLOW_DEFAULT_MODEL=$JCODE_ALLOW_DEFAULT fm_jcode_api "${jcode_create_args[@]}") && [ -n "$JCODE_SESSION" ] || {
         echo "error: could not create the jcode worker session for $ID through the harness API" >&2
         exit 1
       }
@@ -5938,6 +5963,7 @@ EOF
         echo "error: could not bind jcode session $JCODE_SESSION to task $ID" >&2
         exit 1
       }
+      [ "$KIND" != secondmate ] || fm_jcode_api rename "$JCODE_SESSION" "fm:$ID" >/dev/null 2>&1 || true
     fi
     ;;
   esac
@@ -6728,6 +6754,11 @@ if [ "$HARNESS" = jcode ] && [ "$RAW_LAUNCH" -eq 0 ]; then
   if ! jcode_wait_for_ready; then
     jcode_spawn_fail "$JCODE_READY_FAILURE"
     exit 1
+  fi
+  # A secondmate relaunch starts a fresh session; the previous one is archived
+  # (reversible) only after the new one reported ready.
+  if [ -n "${JCODE_PRIOR_SESSION:-}" ] && [ "$JCODE_PRIOR_SESSION" != "$JCODE_SESSION" ]; then
+    fm_jcode_api archive "$JCODE_PRIOR_SESSION" >/dev/null 2>&1 || true
   fi
 fi
 fi # end of the pane launch (BACKEND != jcode)
