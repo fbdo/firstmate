@@ -25,7 +25,10 @@ DPID=
 HOMES=()
 cleanup_all() {
   local h
-  for h in "${HOMES[@]}"; do FM_HOME="$h" XDG_RUNTIME_DIR="$XDG" "$ROOT/bin/fm-jcode-keeper.sh" stop >/dev/null 2>&1; done
+  for h in "$TMP_ROOT"/*/home; do
+    [ -d "$h/state" ] || continue
+    FM_HOME="$h" XDG_RUNTIME_DIR="$XDG" "$ROOT/bin/fm-jcode-keeper.sh" stop >/dev/null 2>&1
+  done
   [ -z "$DPID" ] || kill "$DPID" 2>/dev/null
 }
 trap cleanup_all EXIT

@@ -50,6 +50,7 @@ cleanup() {
   fi
   FM_HOME="$H" "$ROOT/bin/fm-jcode-keeper.sh" stop >/dev/null 2>&1
   for wt in "${WTS[@]}"; do [ -z "$wt" ] || (cd "$PROJ" && treehouse return --force "$wt" >/dev/null 2>&1); done
+  find "$LAB" -type d -exec chmod u+rwx {} + 2>/dev/null
   rm -rf -- "$LAB"
 }
 trap cleanup EXIT
@@ -141,7 +142,7 @@ fi
 
 # Teardown kill arm: children first, then the worker.
 ( cd "$ROOT" && FM_HOME="$H" FM_STATE_OVERRIDE="$STATE" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_kill jcode "jcode:$1"' "$ROOT" "$SID" ) || fail "the teardown kill arm failed"
-api exists "$SID" && fail "the worker must be archived after the kill arm"
+api session-exists "$SID" && fail "the worker must be archived after the kill arm"
 note "teardown arm archived the worker and its children"
 
 FM_HOME="$H" "$ROOT/bin/fm-jcode-keeper.sh" stop >/dev/null

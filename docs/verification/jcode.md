@@ -49,3 +49,11 @@ These were observed against private daemons on the same version while the launch
 | How does a worker's client exit? | SIGTERM to the TUI client printed its resume command, released its Herdr agent report, fired `session_end`, and left the pane at its shell; the session stayed resumable. |
 | Do model and effort hold through the TUI's resume? | Yes: a session created with effort `low` (with or without a model) ran its next turn and saved `reasoning_effort: low`. While the TUI held the session, a second connection's attach reported the daemon default `medium`, so that report is no reading of a held session. |
 | What does the composer read? | `unknown` (the prompt is `N>`); the ordinary doorbell still lands, as the live steer above shows. |
+
+## Native runtime backend (shared daemon), 2026-10-19
+
+`FM_JCODE_NATIVE_LIVE=1 tests/fm-jcode-native-live-e2e.test.sh`, jcode v0.99.0 (774613c90), the captain's shared daemon, isolated lab `FM_HOME`, model `claude-sonnet-5-5`, effort low. Only sessions titled `fm:fmlive-*` were created, and all were archived in the EXIT trap. The daemon, `~/.jcode/config.toml`, and swarm labels were not touched (the hook-registration check read a throwaway config).
+
+Observed passing: real `fm-spawn.sh` on `backend=jcode` (lease, explicit model, title, keeper attach, memory off, brief), keeper-recorded brief turn, `fm-send` steer injected and recorded in `injected/`, `fm-control interrupt` (`cancel=cancelled`), keeper restart through `ensure` after the keeper was killed mid-turn, bridge kill restored by `ensure`, the teardown kill arm archiving the worker, and `keeper stop` leaving no lab process.
+
+Not proven live: (1) the crash-recovery re-prompt did not fire in the live run (marker absent): the turn had already ended or the daemon retained it while the keeper was down, so the one-shot re-prompt is proven only against the fake daemon; (2) the worker did not choose to start a subagent in the allotted time, so the live child record and child archive are proven only portably. A first run failed because `exists` counted an archived session as present; the adapter now uses `session-exists`, which ignores archived sessions.

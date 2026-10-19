@@ -285,7 +285,7 @@ async function main() {
   if (verb === "session-exists") {
     const reply = await request({ req: "list_sessions" }, "list_sessions");
     if (reply.ev !== "sessions") fail(3, "list_sessions failed");
-    const found = (reply.sessions || []).some((s) => s.session_id === target);
+    const found = (reply.sessions || []).some((s) => s.session_id === target && !s.archived);
     bridge.close();
     process.exit(found ? 0 : 1);
   }

@@ -154,14 +154,14 @@ fm_backend_jcode_archive_children() {  # (uses _JC_* from fm_backend_jcode_resol
 fm_backend_jcode_kill() {  # <target>
   local rc=0
   fm_backend_jcode_resolve "$1" || return 1
-  fm_jcode_native_api "$_JC_META" exists "$_JC_SESSION" >/dev/null 2>&1 || rc=$?
+  fm_jcode_native_api "$_JC_META" session-exists "$_JC_SESSION" >/dev/null 2>&1 || rc=$?
   [ "$rc" -ne 1 ] || return 0
   [ "$rc" -eq 0 ] || { echo "error: cannot reach the jcode API to close $_JC_SESSION" >&2; return 1; }
   fm_backend_jcode_archive_children
   fm_jcode_native_api "$_JC_META" cancel "$_JC_SESSION" >/dev/null 2>&1 || true
   fm_jcode_native_api "$_JC_META" archive "$_JC_SESSION" >/dev/null || {
     rc=$?
-    if fm_jcode_native_api "$_JC_META" exists "$_JC_SESSION" >/dev/null 2>&1; then return 1; fi
+    if fm_jcode_native_api "$_JC_META" session-exists "$_JC_SESSION" >/dev/null 2>&1; then return 1; fi
     return 0
   }
 }
@@ -181,7 +181,7 @@ fm_backend_jcode_target_exists() {  # <target>
   session=$(fm_backend_jcode_session "$1") || return 1
   meta=$(fm_backend_jcode_meta "$1") || return 1
   fm_jcode_with_meta_env "$meta" node "$_FM_BACKEND_JCODE_DIR/fm-jcode-api.mjs" \
-    --socket "$(fm_meta_get "$meta" jcode_api_socket)" exists "$session" >/dev/null 2>&1
+    --socket "$(fm_meta_get "$meta" jcode_api_socket)" session-exists "$session" >/dev/null 2>&1
 }
 
 fm_backend_jcode_agent_state() {  # <target>
@@ -191,7 +191,7 @@ fm_backend_jcode_agent_state() {  # <target>
   state=$(fm_backend_jcode_state_dir)
   task=$(fm_meta_get "$meta" endpoint_task_id)
   fm_jcode_with_meta_env "$meta" node "$_FM_BACKEND_JCODE_DIR/fm-jcode-api.mjs" \
-    --socket "$(fm_meta_get "$meta" jcode_api_socket)" exists "$session" >/dev/null 2>&1 || rc=$?
+    --socket "$(fm_meta_get "$meta" jcode_api_socket)" session-exists "$session" >/dev/null 2>&1 || rc=$?
   case "$rc" in
     0) ;;
     1) printf 'missing'; return 0 ;;
