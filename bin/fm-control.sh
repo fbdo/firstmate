@@ -547,8 +547,14 @@ deliver_interrupt() {
   if [ "$(fm_control_interrupt_transport "$HARNESS")" = api ]; then
     session=$(fm_meta_get "$META" jcode_session)
     [ -n "$session" ] || die "task $ID records no jcode session (jcode_session is absent from its record), so its turn cannot be cancelled through the harness API; the task was launched raw or its record is incomplete. Reconcile the task or relaunch it"
-    cancel=$(FM_JCODE_CANCEL_WAIT_MS=$(awk -v t="$SETTLE_WAIT" 'BEGIN{printf "%d", t * 1000}') \
-      fm_jcode_with_meta_env "$META" node "$SCRIPT_DIR/fm-jcode-api.mjs" cancel "$session") || {
+    if [ "$BACKEND" = jcode ]; then
+      fm_jcode_owned_session "$STATE" "$session" || die "jcode session $session is not owned by this firstmate home; refusing to cancel it"
+      cancel=$(FM_JCODE_CANCEL_WAIT_MS=$(awk -v t="$SETTLE_WAIT" 'BEGIN{printf "%d", t * 1000}') \
+        fm_jcode_native_api "$META" cancel "$session")
+    else
+      cancel=$(FM_JCODE_CANCEL_WAIT_MS=$(awk -v t="$SETTLE_WAIT" 'BEGIN{printf "%d", t * 1000}') \
+        fm_jcode_with_meta_env "$META" node "$SCRIPT_DIR/fm-jcode-api.mjs" cancel "$session")
+    fi || {
       [ "$cancel" = unconfirmed ] \
         || die "task $ID's jcode session $session could not be cancelled through the harness API; the interrupt status is unknown, so no further control action is safe here"
     }
@@ -705,6 +711,48 @@ exit_jcode_client() {
   printf 'stopped%s' "$suffix"
 }
 
+# exit_jcode_native: a native worker has no client to stop. Cancel any running
+# turn through the API, then record the exit marker, which makes the keeper drop
+# its attachment and agent_state read `dead`. The session stays in the daemon.
+exit_jcode_native() {
+  local cancel state suffix=''
+  cancel=$(deliver_interrupt) || return $?
+  [ "$cancel" = not-running ] || suffix=" cancel=$cancel"
+  : > "$STATE/$ID.jcode-exited" || die "could not record the exit of task $ID"
+  state=$(wait_agent_state "$EXIT_WAIT" dead) \
+    || die "exit-delivered $ID cancel=$cancel agent-state=$state exit=unconfirmed; the jcode worker did not read stopped within ${EXIT_WAIT}s"
+  retire_busy_incarnation
+  printf 'stopped%s' "$suffix"
+}
+
+# do_relaunch_jcode: re-prompt the same session in place (amended D6): cancel,
+# clear the exit marker, then deliver the updated brief, which carries the
+# progress note. A cross-harness relaunch is refused (there is no pane).
+do_relaunch_jcode() {
+  local exit_result session
+  [ "$TARGET_HARNESS" = jcode ] || die "task $ID runs on the native jcode backend, which has no pane to start another harness in; refusing a cross-harness relaunch"
+  session=$(fm_meta_get "$META" jcode_session)
+  [ -n "$session" ] || die "task $ID records no jcode session"
+  fm_jcode_owned_session "$STATE" "$session" || die "jcode session $session is not owned by this firstmate home"
+  case "$KIND" in
+    ship|scout) ;;
+    *) die "task $ID records kind '$KIND', which has no defined relaunch shape" ;;
+  esac
+  RELAUNCH_BRIEF="$DATA/$ID/brief.md"
+  [ -f "$RELAUNCH_BRIEF" ] || die "task $ID has no instructions at $RELAUNCH_BRIEF"
+  [ "$NOTE_SET" = 1 ] && [ -n "$NOTE" ] || die "relaunch of a $KIND task requires --note (or --note-file)"
+  cp -p "$META" "$META_PRIOR" || die "could not preserve task $ID's durable record before relaunching"
+  record_note
+  exit_result=$(do_exit)
+  rm -f "$STATE/$ID.jcode-exited"
+  "$SCRIPT_DIR/fm-jcode-keeper.sh" ensure >/dev/null 2>&1 || die "the jcode keeper could not be started for $ID"
+  "$SCRIPT_DIR/fm-busy-event.sh" arm "$STATE" "$ID" >/dev/null 2>&1 || true
+  "$SCRIPT_DIR/fm-operational-input.sh" encode launch-brief <"$RELAUNCH_BRIEF" \
+    | fm_jcode_native_api "$META" send "$session" >/dev/null \
+    || die "the relaunch brief could not be delivered to jcode session $session"
+  echo "relaunched $ID harness=jcode from=jcode model=$TARGET_MODEL effort=$TARGET_EFFORT backend=jcode endpoint=$T worktree=$WT exit=$exit_result"
+}
+
 # do_exit: stop the running agent, preserving endpoint and worktree. Prints
 # `already-stopped`, `endpoint-gone`, or `stopped`.
 do_exit() {
@@ -753,6 +801,10 @@ do_exit() {
       ;;
     *) die "task $ID's endpoint reads '$state' rather than a positively classified state; refusing to send a lifecycle command into an unattributed endpoint" ;;
   esac
+  if [ "$BACKEND" = jcode ]; then
+    exit_jcode_native
+    return
+  fi
   if [ "$(fm_control_interrupt_transport "$HARNESS")" = api ]; then
     exit_jcode_client
     return
@@ -1175,6 +1227,10 @@ do_relaunch() {
 
   require_state_verified_backend relaunch
   resolve_relaunch_profile
+  if [ "$BACKEND" = jcode ]; then
+    do_relaunch_jcode
+    return
+  fi
 
   case "$KIND" in
     ship|scout)

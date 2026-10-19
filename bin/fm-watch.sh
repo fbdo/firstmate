@@ -1783,6 +1783,7 @@ noprogress_check() {  # <window> <task> <window-key> <busy-now> <kind>
 jcode_silent_stop_check() {  # <window> <task> <tail40>
   local win=$1 task=$2 tail40=$3 statusf marker reason size notice
   [ "$(window_harness "$win")" = jcode ] || return 0
+  [ "$(window_backend "$win")" != jcode ] || return 0
   statusf="$STATE/$task.status"
   status_is_captain_relevant "$(last_status_line "$statusf")" && return 0
   # Only the TUI's own warning line counts, so a worker that merely prints or
@@ -1823,6 +1824,7 @@ jcode_note_surfaced() {  # <window> <task> <window-key>
 # status line changes the log size, so a genuinely wedged busy worker and any
 # real change keep their normal handling.
 jcode_finished_idle_churn() {  # <window> <task> <window-key>
+  [ "$(window_backend "$1")" != jcode ] || return 1
   local win=$1 task=$2 key=$3 record verb
   [ "$(window_harness "$win")" = jcode ] || return 1
   record=$(fm_busy_record_read "$STATE" "$task") || return 1
@@ -2714,6 +2716,45 @@ event_wait_or_sleep() {
       _event_cap_fails=0
       ;;
   esac
+}
+
+# jcode_keeper_health: once per cycle, when any live backend=jcode task is
+# recorded and the keeper's heartbeat is stale, run `fm-jcode-keeper.sh ensure`
+# (bounded). When it fails because the shared daemon is down, raise one stale
+# wake per outage; the marker clears when ensure succeeds again.
+jcode_keeper_health() {
+  local meta id any=0 beat now out marker="$STATE/.jcode-daemon-down"
+  for meta in "$STATE"/*.meta; do
+    [ -e "$meta" ] || continue
+    [ "$(fm_meta_get "$meta" backend)" = jcode ] || continue
+    id=${meta##*/}; id=${id%.meta}
+    [ ! -e "$STATE/$id.jcode-exited" ] || continue
+    any=1
+    break
+  done
+  [ "$any" -eq 1 ] || { rm -f "$marker"; return 0; }
+  beat=$(stat -c %Y "$STATE/jcode/keeper.beat" 2>/dev/null || echo 0)
+  now=$(date +%s)
+  if [ $((now - beat)) -le "${FM_JCODE_KEEPER_BEAT_MAX:-15}" ]; then
+    rm -f "$marker"
+    return 0
+  fi
+  if out=$(timeout 30 "$SCRIPT_DIR/fm-jcode-keeper.sh" ensure 2>&1); then
+    rm -f "$marker"
+    triage_log "jcode keeper restarted by the watcher"
+    return 0
+  fi
+  triage_log "jcode keeper ensure failed: $out"
+  if [ ! -e "$marker" ]; then
+    : > "$marker"
+    case "$out" in
+      *"shared jcode daemon is not running"*)
+        fm_wake_append stale "jcode:keeper" "stale: jcode:keeper (shared jcode daemon down)" || return 0
+        wake "stale: jcode:keeper (shared jcode daemon down)"
+        ;;
+    esac
+  fi
+  return 0
 }
 
 # --- Main entry: the runtime below runs only when this file is executed as a
@@ -3627,5 +3668,6 @@ EOF
 
   # Terminal wait: a bounded native-event wait for push-capable homes (herdr),
   # else the blind poll sleep. See event_wait_or_sleep.
+  jcode_keeper_health
   event_wait_or_sleep
 done

@@ -175,3 +175,52 @@ EOF
 test_native_spawn
 test_refusals
 test_keeper_timeout_aborts
+
+# ---- control: interrupt, exit, relaunch on a spawned native task -------------
+control() {  # <case> <verb> <id> [args...]
+  local dir home proj wt fb
+  IFS='|' read -r dir home proj wt fb <<EOF
+$1
+EOF
+  shift
+  env "${SCRUB[@]}" HOME="$home" FM_HOME="$home" FM_ROOT_OVERRIDE='' \
+    XDG_RUNTIME_DIR="$XDG" JCODE_SOCKET="$DSOCK" FM_JCODE_CONFIG="$HOOKCFG" \
+    FM_JCODE_KEEPER_SCAN_MS=100 FM_JCODE_KEEPER_BEAT_MS=500 FM_CONTROL_EXIT_WAIT=10 FM_CONTROL_SETTLE_WAIT=3 \
+    FM_JCODE_CHILD_ENV_PASS="FM_JCODE_KEEPER_SCAN_MS FM_JCODE_KEEPER_BEAT_MS" \
+    PATH="$fb:$(dirname "$(command -v node)"):/usr/bin:/bin:/usr/sbin:/sbin" \
+    "$ROOT/bin/fm-control.sh" "$@" 2>&1
+}
+
+test_control_native() {
+  local rec dir home proj wt fb id=nsp8 out rc sid before
+  rec=$(make_case ctl "$id")
+  IFS='|' read -r dir home proj wt fb <<EOF
+$rec
+EOF
+  out=$(run_spawn "$rec" "$id" --backend jcode --model m1); rc=$?
+  [ "$rc" -eq 0 ] || fail "spawn for the control test failed: $out"
+  sid=$(sed -n 's/^jcode_session=//p' "$home/state/$id.meta")
+  printf '{"hold":true}' >"$DDIR/script.json"
+  printf 'work' | node "$ROOT/bin/fm-jcode-api.mjs" --socket "$(sed -n 's/^jcode_api_socket=//p' "$home/state/$id.meta")" send "$sid"
+  for _ in $(seq 1 50); do grep -q '^busy' "$home/state/jcode/live/$sid" && break; sleep 0.1; done
+  out=$(control "$rec" "$id" interrupt); rc=$?
+  [ "$rc" -eq 0 ] || fail "interrupt failed: $out"
+  assert_contains "$out" "cancelled" "interrupt reports the cancel claim"
+  rm -f "$DDIR/script.json"
+  out=$(control "$rec" "$id" exit); rc=$?
+  [ "$rc" -eq 0 ] || fail "exit failed: $out"
+  assert_contains "$out" "stopped" "exit stops the worker"
+  [ -e "$home/state/$id.jcode-exited" ] || fail "exit must record the exited marker"
+  printf 'Progress: resumed after review.' >"$TMP_ROOT/note.txt"
+  before=$(grep -c "Exercise native jcode dispatch" "$DDIR/requests.log")
+  out=$(control "$rec" "$id" relaunch --note-file "$TMP_ROOT/note.txt"); rc=$?
+  [ "$rc" -eq 0 ] || fail "relaunch failed: $out"
+  [ ! -e "$home/state/$id.jcode-exited" ] || fail "relaunch clears the exited marker"
+  [ "$(grep -c "Exercise native jcode dispatch" "$DDIR/requests.log")" -gt "$before" ] || fail "relaunch re-prompts the same session with the brief"
+  grep -q "$sid" "$home/state/$id.jcode-session" || fail "relaunch keeps the same session"
+  out=$(control "$rec" "$id" relaunch --harness claude --note "x"); rc=$?
+  [ "$rc" -ne 0 ] || fail "a cross-harness relaunch must refuse on the native backend"
+  pass "control on a native task: interrupt cancels, exit records the marker, relaunch re-prompts in place"
+}
+
+test_control_native
