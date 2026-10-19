@@ -62,8 +62,18 @@
 //                                             non-attached session_status value
 //                                             (`running`, `idle`, ...).
 //
-//   fm-jcode-api.mjs soft <session-id>        read text on stdin; submit it as a
-//                                             soft interrupt (client_id fm-<epoch>).
+//   fm-jcode-api.mjs rename <id> <title>     rename_session.
+//   fm-jcode-api.mjs runtime <id> <cmd> [args...]
+//                                             runtime_command; print `data` as JSON,
+//                                             exit 1 on error.
+//   fm-jcode-api.mjs children <id>            print `<session>\t<label>\t<dir>\t<status>`
+//                                             for each live session whose
+//                                             parent_session_id is <id>.
+//   `create` refuses without --model unless FM_JCODE_API_ALLOW_DEFAULT_MODEL is set.
+//
+//   fm-jcode-api.mjs soft <session-id> [--client-id <cid>]
+//                                             read text on stdin; submit it as a
+//                                             soft interrupt (client_id default fm-<epoch>).
 //                                             Exit 0 once the daemon answers ok.
 //   fm-jcode-api.mjs history <session-id> [--lines N]
 //                                             print the transcript tail as plain
@@ -87,7 +97,7 @@ import { spawn } from "node:child_process";
 import net from "node:net";
 
 const TIMEOUT_MS = Number(process.env.FM_JCODE_API_TIMEOUT_MS || 15000);
-const VERBS = ["create", "send", "remind", "cancel", "archive", "session-exists", "soft", "history", "exists", "status"];
+const VERBS = ["create", "send", "remind", "cancel", "archive", "session-exists", "soft", "history", "exists", "status", "rename", "runtime", "children"];
 let argv = process.argv.slice(2);
 let socketPath = "";
 {
@@ -119,12 +129,21 @@ function usage(message) {
 if (!verb || !target) usage("missing arguments");
 if (!VERBS.includes(verb)) usage(`unknown verb ${verb}`);
 const options = {};
-const allowed = verb === "create" ? ["--model", "--effort", "--note"] : verb === "history" ? ["--lines"] : [];
-for (let i = 0; i < rest.length; i += 2) {
-  const key = rest[i];
-  const value = rest[i + 1];
-  if (!allowed.includes(key) || !value) usage(`unexpected argument ${key}`);
-  options[key.slice(2)] = value;
+let positional = [];
+if (verb === "rename" || verb === "runtime") {
+  positional = rest;
+  if (!positional.length || (verb === "rename" && !positional[0])) usage(`${verb} needs arguments`);
+} else {
+  const allowed = verb === "create" ? ["--model", "--effort", "--note"] : verb === "history" ? ["--lines"] : verb === "soft" ? ["--client-id"] : [];
+  for (let i = 0; i < rest.length; i += 2) {
+    const key = rest[i];
+    const value = rest[i + 1];
+    if (!allowed.includes(key) || !value) usage(`unexpected argument ${key}`);
+    options[key.slice(2)] = value;
+  }
+}
+if (verb === "create" && !options.model && !process.env.FM_JCODE_API_ALLOW_DEFAULT_MODEL) {
+  usage("create needs --model (the daemon default model is not predictable for API sessions)");
 }
 if (verb !== "create" && !/^[A-Za-z0-9_.-]+$/.test(target)) usage("invalid session id");
 
@@ -271,6 +290,17 @@ async function main() {
     process.exit(found ? 0 : 1);
   }
 
+  if (verb === "children") {
+    const reply = await request({ req: "list_sessions" }, "list_sessions");
+    if (reply.ev !== "sessions") fail(3, "list_sessions failed");
+    for (const c of reply.sessions || []) {
+      if (c.parent_session_id !== target || c.archived) continue;
+      process.stdout.write(`${c.session_id}\t${c.agent_label || ""}\t${c.working_dir || ""}\t${c.status || ""}\n`);
+    }
+    bridge.close();
+    process.exit(0);
+  }
+
   if (verb === "create") {
     const created = await request({ req: "create_session", working_dir: target }, "create_session");
     if (created.ev !== "attached" || !created.session?.session_id) {
@@ -341,8 +371,24 @@ async function main() {
     process.exit(0);
   }
 
+  if (verb === "rename") {
+    const reply = await request({ req: "rename_session", session_id: target, title: positional[0] }, "rename_session");
+    if (reply.ev !== "ok") fail(1, `rename_session refused: ${reply.message || reply.ev}`);
+    bridge.close();
+    process.exit(0);
+  }
+
+  if (verb === "runtime") {
+    const [command, ...args] = positional;
+    const reply = await request({ req: "runtime_command", session_id: target, command, args }, "runtime_command");
+    if (reply.ev === "error") fail(1, `runtime_command refused: ${reply.message || reply.code}`);
+    process.stdout.write(`${JSON.stringify(reply.data ?? null)}\n`);
+    bridge.close();
+    process.exit(0);
+  }
+
   if (verb === "soft") {
-    const reply = await request({ req: "soft_interrupt", session_id: target, content: text, client_id: `fm-${Date.now()}` }, "soft_interrupt");
+    const reply = await request({ req: "soft_interrupt", session_id: target, content: text, client_id: options["client-id"] || `fm-${Date.now()}` }, "soft_interrupt");
     if (reply.ev !== "ok") fail(1, `soft_interrupt refused: ${reply.message || reply.ev}`);
     bridge.close();
     process.exit(0);

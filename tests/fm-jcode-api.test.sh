@@ -24,7 +24,7 @@ api() { node "$API" --socket "$SOCK" "$@"; }
 
 test_socket_transport_creates_and_sends() {
   local sid out
-  sid=$(api create "$TMP_ROOT" --note "hello") || fail "create over the socket failed"
+  sid=$(api create "$TMP_ROOT" --model m1 --note "hello") || fail "create over the socket failed"
   case "$sid" in session_fake_*) ;; *) fail "unexpected session id '$sid'" ;; esac
   # create's connection closed; the session persists because of the no-reply note.
   api exists "$sid" || fail "exists must succeed for a persisted session"
@@ -64,6 +64,30 @@ test_status_and_soft() {
   pass "status and soft interrupt over the socket"
 }
 
+test_step2_verbs() {
+  local out sid2
+  api create "$TMP_ROOT" >/dev/null 2>&1; [ $? -eq 2 ] || fail "create without --model must exit 2"
+  sid2=$(FM_JCODE_API_ALLOW_DEFAULT_MODEL=1 api create "$TMP_ROOT") || fail "create with the escape hatch failed"
+  api rename "$SID" "fm:task-1" || fail "rename failed"
+  grep -q '"req":"rename_session".*"fm:task-1"' "$DIR/requests.log" || fail "rename_session not sent"
+  out=$(api runtime "$SID" memory off) || fail "runtime failed"
+  [ "$out" = '{"enabled":false}' ] || fail "memory off must read enabled:false, got $out"
+  out=$(api runtime "$SID" memory status) || fail "runtime status failed"
+  [ "$out" = '{"enabled":false}' ] || fail "memory off holds while another connection holds the session, got $out"
+  api runtime "$sid2" memory off >/dev/null; sleep 0.2
+  out=$(api runtime "$sid2" memory status) || fail "runtime status failed"
+  [ "$out" = '{"enabled":true}' ] || fail "memory off must not outlive the last connection, got $out"
+  api runtime "$SID" bogus >/dev/null 2>&1; [ $? -eq 1 ] || fail "runtime error must exit 1"
+  printf 'child %s helper /tmp/x\n' "$SID" >"$DIR/ctl"; sleep 0.3
+  out=$(api children "$SID") || fail "children failed"
+  assert_contains "$out" "helper	/tmp/x	idle" "children lists label, dir, status"
+  [ -z "$(api children "$sid2")" ] || fail "no children expected for an unrelated session"
+  printf 'x' | api soft "$SID" --client-id fm-task-1-9 || fail "soft with client id failed"
+  grep -q '"client_id":"fm-task-1-9"' "$DIR/requests.log" || fail "soft must pass the caller client id"
+  api archive "$sid2"
+  pass "rename, runtime, children, soft --client-id, model required"
+}
+
 test_refused_socket_exits_4() {
   node "$API" --socket "$TMP_ROOT/none.sock" exists whatever 2>/dev/null
   [ $? -eq 4 ] || fail "a refused or absent socket must exit 4"
@@ -89,4 +113,5 @@ test_socket_transport_creates_and_sends
 hold_attached
 test_history_renders_tail
 test_status_and_soft
+test_step2_verbs
 test_refused_socket_exits_4

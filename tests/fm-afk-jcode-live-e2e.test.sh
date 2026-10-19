@@ -56,7 +56,7 @@ nohup jcode --quiet --no-update serve --socket "$JCODE_SOCKET" >"$LAB/serve.log"
 for _ in $(seq 1 40); do [ -S "$JCODE_SOCKET" ] && break; sleep 0.25; done
 [ -S "$JCODE_SOCKET" ] || fail "the private jcode daemon did not come up: $(tail -n 3 "$LAB/serve.log")"
 
-SID=$(node "$ROOT/bin/fm-jcode-api.mjs" create "$LAB" --note "afk live guard session") \
+SID=$(FM_JCODE_API_ALLOW_DEFAULT_MODEL=1 node "$ROOT/bin/fm-jcode-api.mjs" create "$LAB" --note "afk live guard session") \
   || fail "could not create the stand-in primary session"
 printf '%s\n' "$SID" > "$H/state/.lock-session"
 : > "$H/state/.afk"

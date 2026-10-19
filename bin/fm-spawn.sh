@@ -5818,7 +5818,7 @@ EOF
       jcode_create_args=(create "$WT" --note "Firstmate worker session for task $ID. The launch brief follows as the next message.")
       [ -z "$MODEL" ] || [ "$MODEL" = default ] || jcode_create_args+=(--model "$MODEL")
       [ -z "$EFFORT" ] || [ "$EFFORT" = default ] || jcode_create_args+=(--effort "$EFFORT")
-      JCODE_SESSION=$(fm_jcode_api "${jcode_create_args[@]}") && [ -n "$JCODE_SESSION" ] || {
+      JCODE_SESSION=$(FM_JCODE_API_ALLOW_DEFAULT_MODEL=1 fm_jcode_api "${jcode_create_args[@]}") && [ -n "$JCODE_SESSION" ] || {
         echo "error: could not create the jcode worker session for $ID through the harness API" >&2
         exit 1
       }

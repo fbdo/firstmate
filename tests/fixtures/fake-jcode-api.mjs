@@ -11,7 +11,8 @@
 // <dir> holds: state.json (sessions, survives a restart), requests.log (one JSON
 // request per line), ctl (control commands, one per line, consumed), and an
 // optional script.json ({"turn_ms": 50, "hold": false}).
-// Control commands: `finish <session>`, `stop <session> <reason> [message]`,
+// Control commands: `child <parent> <label> [dir]` (add a session with
+// parent_session_id), `finish <session>`, `stop <session> <reason> [message]`,
 // `drop` (close every connection, keep listening), `crash` (close everything
 // and exit non-zero, leaving a stale socket file behind).
 //
@@ -77,7 +78,19 @@ if (mode === "proxy") {
   };
   const emit = (socket, frame) => { if (!socket.destroyed) socket.write(`${JSON.stringify({ v: 1, ...frame })}\n`); };
   const broadcast = (id, frame) => { for (const s of attached[id] || []) emit(s, frame); };
-  const info = (id) => ({ session_id: id, working_dir: sessions[id].working_dir, status: sessions[id].status, archived: !!sessions[id].archived });
+  const info = (id) => ({
+    session_id: id,
+    working_dir: sessions[id].working_dir,
+    status: sessions[id].status,
+    archived: !!sessions[id].archived,
+    title: sessions[id].title,
+    parent_session_id: sessions[id].parent,
+    agent_label: sessions[id].label,
+  });
+  // memory is per session and resets when the last connection holding it closes
+  // (verified, jcode v0.99.0); swarm is per connection.
+  const memory = {}; // session -> boolean while held
+  const swarmOf = new Map(); // socket -> boolean
   const endTurn = (id, assistant) => {
     if (running[id] && running[id] !== "hold") clearTimeout(running[id]);
     delete running[id];
@@ -127,6 +140,11 @@ if (mode === "proxy") {
         if (!known()) return;
         (attached[id] ||= new Set()).add(socket);
         reply({ ev: "attached", session: info(id) });
+        if (sessions[id].crashed) {
+          sessions[id].crashed = false;
+          save();
+          emit(socket, { ev: "session_recovery", session_id: id, message: "interrupted by a server reload while a tool was running" });
+        }
         emit(socket, { ev: "session_status", session_id: id, status: "attached" });
         emit(socket, { ev: "session_status", session_id: id, status: sessions[id].status });
         return;
@@ -146,7 +164,14 @@ if (mode === "proxy") {
       case "soft_interrupt": {
         if (!known()) return;
         reply({ ev: "ok" });
-        if (sessions[id].status !== "running") startTurn(id, req.content);
+        if (sessions[id].status !== "running") {
+          startTurn(id, req.content);
+          broadcast(id, { ev: "soft_interrupt_injected", session_id: id, point: "turn_start", client_ids: [req.client_id] });
+        } else {
+          sessions[id].history.push({ role: "user", content: req.content });
+          save();
+          broadcast(id, { ev: "soft_interrupt_injected", session_id: id, point: "D", client_ids: [req.client_id] });
+        }
         return;
       }
       case "cancel": {
@@ -160,6 +185,26 @@ if (mode === "proxy") {
         }
         return;
       }
+      case "rename_session": {
+        if (!known()) return;
+        sessions[id].title = req.title;
+        save();
+        reply({ ev: "ok" });
+        return broadcast(id, { ev: "session_renamed", session_id: id, display_title: req.title });
+      }
+      case "runtime_command": {
+        if (!known()) return;
+        if (req.command === "memory") {
+          if (req.args?.[0] === "off") memory[id] = false;
+          else if (req.args?.[0] === "on") memory[id] = true;
+          return reply({ ev: "runtime_command_result", data: { enabled: memory[id] ?? true } });
+        }
+        if (req.command === "swarm") {
+          if (req.args?.[0] === "off") swarmOf.set(socket, false);
+          return reply({ ev: "runtime_command_result", data: { enabled: swarmOf.get(socket) ?? true } });
+        }
+        return err("invalid_request", `unknown runtime command ${req.command}`);
+      }
       case "get_history": return known() && reply({ ev: "history", session_id: id, messages: sessions[id].history });
       case "archive_session": {
         if (!id || !sessions[id]) return err("unknown_session", `unknown session ${id}`);
@@ -171,10 +216,16 @@ if (mode === "proxy") {
     }
   };
   const abandonIfOrphaned = (id) => {
-    if (running[id] && (!attached[id] || attached[id].size === 0)) endTurn(id, "");
+    if (running[id] && (!attached[id] || attached[id].size === 0)) {
+      endTurn(id, "");
+      sessions[id].crashed = true;
+      save();
+    }
+    if (!attached[id] || attached[id].size === 0) delete memory[id];
   };
   const server = net.createServer((socket) => {
     conns.add(socket);
+    socket.on("close", () => swarmOf.delete(socket));
     lines(socket, (line) => handle(socket, line));
     socket.on("error", () => {});
     socket.on("close", () => {
@@ -199,6 +250,10 @@ if (mode === "proxy") {
         endTurn(id, "");
         broadcast(id, { ev: "turn_stopped", session_id: id, reason: reason || "failure", message: msg.join(" ") || "boom" });
         broadcast(id, { ev: "session_status", session_id: id, status: "idle" });
+      } else if (cmd === "child" && sessions[id]) {
+        const sid = `session_fake_${Object.keys(sessions).length + 1}`;
+        sessions[sid] = { history: [], status: "idle", working_dir: msg[0] || sessions[id].working_dir, parent: id, label: reason };
+        save();
       } else if (cmd === "drop") {
         for (const s of [...conns]) s.destroy();
       } else if (cmd === "crash") {
