@@ -1038,6 +1038,19 @@ EOF
     || fail "the previous session must be archived only after the new brief turn was sent"
   pass "fm-spawn: a jcode secondmate respawn starts a fresh session and archives the previous one after readiness"
 
+  # The liveness probe must treat a dead jcode pane as recoverable (not an unverified harness).
+  (
+    # shellcheck source=bin/fm-secondmate-liveness-lib.sh
+    . "$ROOT/bin/fm-secondmate-liveness-lib.sh"
+    fm_backend_agent_state() { printf 'dead'; }
+    fm_backend_of_meta() { printf 'tmux'; }
+    fm_backend_target_of_meta() { printf 'x:y'; }
+    printf 'window=x:y\nkind=secondmate\nharness=jcode\n' > "$TMP_ROOT/liveness.meta"
+    fm_secondmate_liveness_probe "$TMP_ROOT/liveness.meta" jcsm1 poll
+    [ "$FM_SM_LIVE_STATUS" = relaunchable ]
+  ) || fail "a dead jcode secondmate pane must be relaunchable by the liveness probe"
+  pass "liveness: a dead jcode secondmate pane is relaunchable"
+
   rec=$(make_jcode_secondmate_case nomodel jcsm2)
   rc=0
   out=$(run_jcode_secondmate_spawn "$rec" jcsm2 --harness jcode) || rc=$?
