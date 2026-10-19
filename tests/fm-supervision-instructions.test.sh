@@ -304,7 +304,19 @@ test_pi_snippet_uses_effective_extension_path() {
   pass "pi supervision snippet renders the effective extension path"
 }
 
+test_jcode_afk_repair_line_names_the_native_start() {
+  local out
+  out=$("$RENDER" --harness jcode --afk 1 --repair-line)
+  assert_contains "$out" "start-native" "jcode away repair line must name the native start"
+  assert_contains "$out" "FM_AFK_STATE_PREPARED=1 bin/fm-afk-start.sh" "jcode away repair line must name the native daemon job"
+  out=$("$RENDER" --harness jcode --afk 1 --afk-mode quiet --repair-line)
+  assert_contains "$out" "Quiet mode" "jcode quiet repair line must name quiet mode"
+  assert_contains "$out" "start-native" "jcode quiet repair line must name the native start"
+  pass "jcode afk repair line names the jcode-native daemon start"
+}
+
 test_supervision_host_protocol_on_a_claude_home_unless_off
+test_jcode_afk_repair_line_names_the_native_start
 test_supervision_host_protocol_on_every_arm_owner
 test_selected_harness_block_only
 test_unknown_fallback

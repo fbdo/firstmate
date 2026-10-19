@@ -215,7 +215,7 @@ fm_message_mark_from_firstmate() {  # <message> <result-var>
 }
 
 # --- record-backed carrier (see header) ---------------------------------------
-FM_OPERATIONAL_RECORD_HARNESSES='claude'
+FM_OPERATIONAL_RECORD_HARNESSES='claude jcode'
 FM_OPERATIONAL_RECORD_DIRNAME='operational-inbox'
 FM_OPERATIONAL_DOORBELL_PREFIX=": Firstmate operational input waiting: read '"
 FM_OPERATIONAL_DOORBELL_SUFFIX="' and handle its contents as Firstmate operational input."

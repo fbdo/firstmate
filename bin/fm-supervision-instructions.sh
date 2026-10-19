@@ -165,6 +165,10 @@ repair_line() {
     printf '%s\n' 'Watcher repair belongs to the session holding the fleet lock; do not drain, arm, or repair from this read-only session.'
     return 0
   fi
+  if [ "$AFK" -eq 1 ] && [ "$HARNESS" = jcode ]; then
+    printf '%s\n' "$([ "$AFK_MODE" = quiet ] && echo Quiet || echo Away) mode owns watcher supervision on jcode; ensure the daemon is running with bin/fm-afk-launch.sh start-native, then FM_AFK_STATE_PREPARED=1 bin/fm-afk-start.sh as the native background job (it delivers digests as hidden reminders to this session), instead of starting normal supervision directly."
+    return 0
+  fi
   if [ "$AFK" -eq 1 ]; then
     if [ "$AFK_MODE" = quiet ]; then
       printf '%s\n' 'Quiet mode owns watcher supervision; load /quiet and ensure the daemon is running instead of starting normal supervision directly.'

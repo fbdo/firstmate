@@ -153,6 +153,46 @@ unit_pi_never_launches_the_daemon() {
   done
 }
 
+# A jcode primary is supervised by hidden reminder to the lock-owning session,
+# never by pane injection: start refuses and names start-native, start-native
+# needs the sidecar id to equal the trusted id, and nothing is written otherwise.
+unit_jcode_primary_uses_the_api_not_a_pane() {
+  local st out rc
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-jcode.XXXXXX")
+  mkdir -p "$st/state" "$st/config"
+  jcode_launch() {  # <verb> <trusted-id>
+    FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_TEST_HARNESS=jcode TRUSTED="$2" \
+      bash -c '. "$1"; fm_session_lock_trusted_session_id() { [ -n "$TRUSTED" ] && printf "%s\n" "$TRUSTED"; }; fm_afk_launch_main "$2"' _ "$LAUNCH" "$1" 2>&1
+  }
+  out=$(FM_TEST_HARNESS=jcode quiet_in "$st" "$LAUNCH" quiet-check); rc=$?
+  if [ "$rc" -eq 1 ]; then pass "jcode: quiet-check exits 1 (enter through the daemon)"; else fail "jcode quiet-check rc=$rc: $out"; fi
+  enter_posture "$st"
+  out=$(jcode_launch start session_a); rc=$?
+  if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -F start-native >/dev/null && [ ! -e "$st/state/.afk-daemon-terminal" ]; then
+    pass "jcode: start refuses and names start-native"
+  else
+    fail "jcode start did not refuse (rc=$rc): $out"
+  fi
+  out=$(jcode_launch start-native session_a); rc=$?
+  if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -F 'Pane injection is never used' >/dev/null; then
+    pass "jcode: start-native refuses when state/.lock-session is absent"
+  else
+    fail "jcode start-native without a sidecar (rc=$rc): $out"
+  fi
+  printf 'session_b\n' > "$st/state/.lock-session"
+  out=$(jcode_launch start-native session_a); rc=$?
+  if [ "$rc" -ne 0 ]; then pass "jcode: start-native refuses when the sidecar disagrees with the trusted id"; else fail "jcode start-native accepted a disagreeing sidecar: $out"; fi
+  out=$(jcode_launch start-native ""); rc=$?
+  if [ "$rc" -ne 0 ]; then pass "jcode: start-native refuses with no trusted id"; else fail "jcode start-native accepted no trusted id: $out"; fi
+  out=$(jcode_launch start-native session_b); rc=$?
+  if [ "$rc" -eq 0 ] && grep -F 'none' "$st/state/.afk-daemon-terminal" >/dev/null 2>&1 && [ -e "$st/state/.afk" ]; then
+    pass "jcode: start-native records a native entry for the lock owner"
+  else
+    fail "jcode start-native did not prepare (rc=$rc): $out"
+  fi
+  rm -rf "$st"
+}
+
 # A leaked FM_TEST_HARNESS in a real primary's environment must stay inert: the
 # seam fires only alongside the FM_TEST_SEAM marker that test suites set.
 unit_test_harness_seam_requires_the_marker() {
@@ -1725,6 +1765,7 @@ unit_clear_stale
 unit_enter_records_the_posture_in_one_step_without_a_daemon
 unit_retired_two_step_entry_is_refused
 unit_pi_never_launches_the_daemon
+unit_jcode_primary_uses_the_api_not_a_pane
 unit_test_harness_seam_requires_the_marker
 unit_pi_enter_stop_does_not_claim_a_daemon_terminal
 unit_daemon_entry_requires_the_record

@@ -82,6 +82,12 @@
 #   fm-afk-launch.sh start-native
 #                              Prepare lifecycle state for a harness-native
 #                              background job and record that no terminal exists.
+#                              On a jcode primary this is the only launch: the
+#                              daemon (bin/fm-afk-start.sh as the native
+#                              background job) delivers each digest as a hidden
+#                              system reminder to the lock-owning session, and
+#                              both `start` and this refuse unless the id in
+#                              state/.lock-session equals the trusted session id.
 #   fm-afk-launch.sh stop      Correct-ordered exit: SIGTERM the daemon so its
 #                              cleanup flushes WHILE state/.afk is still present,
 #                              wait for it, close a recorded non-native terminal
@@ -160,6 +166,9 @@ FM_AFK_CONTRACT_CMD="$FM_AFK_LAUNCH_DIR/fm-afk-contract.sh"
 # The supervision host's home gate and attended readiness check.
 # shellcheck source=bin/fm-supervision-engine-lib.sh
 . "$FM_AFK_LAUNCH_DIR/fm-supervision-engine-lib.sh"
+# The lock-owner session id a jcode primary's daemon is pinned to.
+# shellcheck source=bin/fm-session-lock-lib.sh
+. "$FM_AFK_LAUNCH_DIR/fm-session-lock-lib.sh"
 
 fm_afk_launch_log() { printf 'fm-afk-launch: %s\n' "$*" >&2; }
 
@@ -700,8 +709,25 @@ fm_afk_launch_create_tmux() {  # <captain-target> <captain-backend>
   fm_afk_launch_log "daemon launched in detached tmux session '$session', supervising $captain_target"
 }
 
+# A jcode primary's daemon delivers by hidden system reminder to the lock-owning
+# session (backend jcode-api, target = session id), never into a pane: every
+# jcode tool shell descends from the shared server, so a pane discovered from
+# its env can belong to another session. Refuses unless the id recorded beside
+# the lock equals this process's trusted id.
+fm_afk_launch_jcode_check() {
+  local id
+  id=$(fm_session_lock_jcode_owner_id "$FM_AFK_LAUNCH_STATE" 1) || {
+    fm_afk_launch_log "a jcode primary needs this session to own the home lock (state/.lock-session naming the trusted JCODE_SESSION_ID); run bin/fm-lock.sh from this session first. Pane injection is never used on jcode"
+    return 1; }
+  printf '%s\n' "$id"
+}
+
 fm_afk_launch_start() {
   local captain_target captain_backend backup artifact had_afk=0 result
+  if [ "$(fm_afk_launch_primary_harness)" = jcode ]; then
+    fm_afk_launch_log "start does not run on a jcode primary (it would type into a pane); use start-native, then run FM_AFK_STATE_PREPARED=1 bin/fm-afk-start.sh as the native background job"
+    return 1
+  fi
   fm_afk_launch_catchup_pending && return 1
   fm_afk_launch_daemon_allowed || return 1
   fm_afk_launch_record_require || return 1
@@ -773,6 +799,9 @@ fm_afk_launch_start() {
 fm_afk_launch_start_native() {
   local backup artifact had_afk=0 result=0
   mkdir -p "$FM_AFK_LAUNCH_STATE" || return 1
+  if [ "$(fm_afk_launch_primary_harness)" = jcode ]; then
+    fm_afk_launch_jcode_check >/dev/null || return 1
+  fi
   fm_afk_launch_catchup_pending && return 1
   fm_afk_launch_daemon_allowed || return 1
   fm_afk_launch_record_require || return 1

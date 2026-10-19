@@ -351,6 +351,23 @@ fm_session_lock_recorded_session_id() {  # <state>
   printf '%s\n' "$recorded"
 }
 
+# Print the jcode session id that owns the lock in state dir $1, or return 1:
+# the id recorded beside the lock, accepted only when it equals this process's
+# trusted id. A caller with no jcode ancestry of its own (a detached daemon)
+# passes <require-trusted>=0 and gets the recorded id after its caller already
+# proved the match. Used to pin the away daemon's jcode-api target to the
+# lock-owning primary session, never to a pane.
+fm_session_lock_jcode_owner_id() {  # <state> [<require-trusted: 1|0>]
+  local state=$1 recorded trusted
+  recorded=$(fm_session_lock_recorded_session_id "$state") || return 1
+  case "$recorded" in *[!A-Za-z0-9_.-]*) return 1 ;; esac
+  if [ "${2:-1}" = 1 ]; then
+    trusted=$(fm_session_lock_trusted_session_id) || return 1
+    [ "$recorded" = "$trusted" ] || return 1
+  fi
+  printf '%s\n' "$recorded"
+}
+
 # True when the lock in state dir $1 was recorded by this same Claude session:
 # the trusted id equals the id recorded beside the lock. No trusted id, no
 # sidecar, or a different recorded id is false.

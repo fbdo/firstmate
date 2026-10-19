@@ -3488,3 +3488,113 @@ test_dialog_name_survives_away_self_handle
 test_seen_terminal_dialog_stale_clears_like_a_plain_stale
 test_dialog_name_joins_unseen_status_escalation
 test_dialog_name_after_demand_deep_inspection_still_escalates
+
+# --- jcode-api supervisor backend --------------------------------------------
+# A jcode primary is supervised through the harness API, never a pane: the
+# digest is a hidden system reminder carrying the record doorbell, sent to the
+# lock-owning session id. A fake `jcode api-bridge` (FM_JCODE_BIN) records every
+# frame; its list, status, and refusal behaviour are set by files in its dir.
+make_fake_jcode_bridge() {  # <dir>
+  mkdir -p "$1"
+  : > "$1/frames.log"
+  cat > "$1/jcode" <<SH
+#!/usr/bin/env node
+const fs = require("fs");
+const D = "$1";
+let buf = "";
+process.stdin.on("data", (d) => {
+  buf += d;
+  let i;
+  while ((i = buf.indexOf("\\n")) >= 0) {
+    const f = JSON.parse(buf.slice(0, i)); buf = buf.slice(i + 1);
+    fs.appendFileSync(D + "/frames.log", JSON.stringify(f) + "\\n");
+    const out = (o) => process.stdout.write(JSON.stringify(o) + "\\n");
+    const known = fs.readFileSync(D + "/sessions", "utf8").split("\\n").filter(Boolean);
+    if (f.req === "hello") out({ v: 1, reply_to: f.id, ev: "hello_ok", version: 1, capabilities: [] });
+    else if (f.req === "list_sessions") out({ v: 1, reply_to: f.id, ev: "sessions", sessions: known.map((s) => ({ session_id: s })) });
+    else if (f.req === "attach_session") {
+      if (!known.includes(f.session_id)) { out({ v: 1, reply_to: f.id, ev: "error", message: "Unknown session" }); continue; }
+      out({ v: 1, reply_to: f.id, ev: "attached", session: { session_id: f.session_id } });
+      out({ v: 1, ev: "session_status", session_id: f.session_id, status: fs.readFileSync(D + "/status", "utf8").trim() });
+    } else if (f.req === "send_message") out({ v: 1, reply_to: f.id, ev: "ok" });
+  }
+});
+SH
+  chmod +x "$1/jcode"
+  printf 'session_owner\n' > "$1/sessions"
+  printf 'idle\n' > "$1/status"
+}
+
+jcode_inject() {  # <bridge-dir> <state> <target> <message>
+  FM_JCODE_BIN="$1/jcode" FM_SUPERVISOR_BACKEND=jcode-api FM_SUPERVISOR_TARGET="$3" \
+    FM_DAEMON_PRIMARY_HARNESS=jcode inject_msg "$4" "$2"
+}
+
+test_inject_msg_jcode_api_delivers_reminder_doorbell() {
+  local dir state bell record
+  command -v node >/dev/null 2>&1 || { pass "inject_msg jcode-api: skipped (node unavailable)"; return; }
+  dir=$(make_supercase inject-jcode)
+  state="$dir/state"
+  make_fake_jcode_bridge "$dir/bridge"
+  afk_enter "$state"
+  printf 'session_owner\n' > "$state/.lock-session"
+  jcode_inject "$dir/bridge" "$state" session_owner "done: shipped it" \
+    || fail "the jcode-api delivery was refused: $INJECT_LAST_FAILURE"
+  grep -F '"session_id":"session_owner"' "$dir/bridge/frames.log" | grep -F '"system_reminder"' >/dev/null \
+    || fail "no system_reminder frame reached the target session: $(cat "$dir/bridge/frames.log")"
+  bell=$(jq -r 'select(.system_reminder) | .system_reminder' "$dir/bridge/frames.log" | head -n 1)
+  fm_operational_doorbell_path "$bell" record || fail "the reminder body is not the record doorbell: $bell"
+  [ "$(jq -r 'select(.system_reminder) | .system_reminder' "$dir/bridge/frames.log" | wc -l | tr -d ' ')" -eq 1 ] \
+    || fail "the reminder was not exactly one line"
+  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-operational-input.sh" open "$record" | grep -F 'done: shipped it' >/dev/null \
+    || fail "fm-operational-input open did not verify and print the digest"
+  pass "inject_msg jcode-api: the digest is a system reminder carrying only the verified record doorbell"
+}
+
+test_inject_msg_jcode_api_defers_and_refuses() {
+  local dir state calls
+  command -v node >/dev/null 2>&1 || { pass "inject_msg jcode-api defer: skipped (node unavailable)"; return; }
+  dir=$(make_supercase inject-jcode-defer)
+  state="$dir/state"
+  make_fake_jcode_bridge "$dir/bridge"
+  afk_enter "$state"
+  printf 'session_owner\n' > "$state/.lock-session"
+  printf 'running\n' > "$dir/bridge/status"
+  jcode_inject "$dir/bridge" "$state" session_owner "done: x" && fail "a running session was injected into"
+  case "${INJECT_LAST_FAILURE:-}" in deferred:*busy*) ;; *) fail "busy deferral not recorded: ${INJECT_LAST_FAILURE:-}" ;; esac
+  grep -F '"system_reminder"' "$dir/bridge/frames.log" >/dev/null && fail "a reminder was sent to a running session"
+  printf 'idle\n' > "$dir/bridge/status"
+  : > "$dir/bridge/sessions"
+  jcode_inject "$dir/bridge" "$state" session_owner "done: x" && fail "an unknown session was injected into"
+  case "${INJECT_LAST_FAILURE:-}" in *"not found"*) ;; *) fail "unknown session failure not recorded: ${INJECT_LAST_FAILURE:-}" ;; esac
+  printf 'session_owner\nsession_other\n' > "$dir/bridge/sessions"
+  jcode_inject "$dir/bridge" "$state" session_other "done: x" && fail "a session that is not the lock owner was injected into"
+  case "${INJECT_LAST_FAILURE:-}" in *"lock-owning"*) ;; *) fail "non-owner refusal not recorded: ${INJECT_LAST_FAILURE:-}" ;; esac
+  rm -f "$state/.lock-session"
+  jcode_inject "$dir/bridge" "$state" session_owner "done: x" && fail "a missing sidecar was injected into"
+  grep -F '"system_reminder"' "$dir/bridge/frames.log" >/dev/null && fail "a refused delivery still sent a reminder"
+  pass "inject_msg jcode-api: running, unknown, non-owner, and unrecorded sessions all stay buffered"
+}
+
+test_inject_msg_jcode_api_presence_gate() {
+  local dir state
+  command -v node >/dev/null 2>&1 || { pass "inject_msg jcode-api gate: skipped (node unavailable)"; return; }
+  dir=$(make_supercase inject-jcode-gate)
+  state="$dir/state"
+  make_fake_jcode_bridge "$dir/bridge"
+  printf 'session_owner\n' > "$state/.lock-session"
+  jcode_inject "$dir/bridge" "$state" session_owner "done: x" && fail "injected while afk was inactive"
+  [ ! -s "$dir/bridge/frames.log" ] || fail "the bridge was called while afk was inactive"
+  pass "inject_msg jcode-api: no bridge call while afk is inactive"
+}
+
+test_jcode_api_backend_is_supported() {
+  fm_backend_list_contains "$FM_SUPERVISOR_SUPPORTED_BACKENDS" jcode-api \
+    || fail "jcode-api is not a supported supervisor backend"
+  pass "jcode-api is a supported supervisor backend"
+}
+
+test_jcode_api_backend_is_supported
+test_inject_msg_jcode_api_delivers_reminder_doorbell
+test_inject_msg_jcode_api_defers_and_refuses
+test_inject_msg_jcode_api_presence_gate

@@ -58,13 +58,16 @@
 //   fm-jcode-api.mjs archive <session-id>     reversibly hide the session from
 //                                             the daemon's listing.
 //   fm-jcode-api.mjs session-exists <id>      exit 0 when the daemon lists <id>.
+//   fm-jcode-api.mjs status <session-id>      attach and print the first
+//                                             non-attached session_status value
+//                                             (`running`, `idle`, ...).
 //
 // Exit codes: 0 success, 1 refused or not found, 2 usage, 3 transport failure.
 // Every failure prints one line on stderr and never retries.
 import { spawn } from "node:child_process";
 
 const TIMEOUT_MS = Number(process.env.FM_JCODE_API_TIMEOUT_MS || 15000);
-const VERBS = ["create", "send", "remind", "cancel", "archive", "session-exists"];
+const VERBS = ["create", "send", "remind", "cancel", "archive", "session-exists", "status"];
 const [verb, target, ...rest] = process.argv.slice(2);
 
 function usage(message) {
@@ -236,6 +239,17 @@ async function main() {
 
   const attached = await request({ req: "attach_session", session_id: target }, "attach_session");
   if (attached.ev !== "attached") fail(1, `attach_session refused: ${attached.message || attached.ev}`);
+
+  if (verb === "status") {
+    const status = await bridge.wait(
+      (f) => f.ev === "session_status" && f.session_id === target && f.status !== "attached",
+      2000,
+    );
+    if (!status) fail(3, "no session_status was reported");
+    process.stdout.write(`${status.status}\n`);
+    bridge.close();
+    process.exit(0);
+  }
 
   if (verb === "cancel") {
     // The attach announces the session's state: `running` while a turn is in

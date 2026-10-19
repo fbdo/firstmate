@@ -28,7 +28,7 @@
 # FM_OPERATIONAL_PREFIX. A human cannot type its leading U+2063 from a normal
 # keyboard at the start of a message, and Herdr transports it as text.
 # A primary harness that strips invisible characters from submitted prompts
-# (fm_operational_harness_needs_record, Claude Code) instead receives the
+# (fm_operational_harness_needs_record, Claude Code and jcode) instead receives the
 # owner's record-backed doorbell: the envelope is written to this home's
 # state/operational-inbox and only a plain doorbell line naming it is typed.
 # Firstmate's contract: a message that starts with the current prefix, a
@@ -86,7 +86,9 @@
 #                                   tmux target or a herdr "<session>:<pane-id>"
 #                                   target; which one it's read as is decided by
 #                                   FM_SUPERVISOR_BACKEND (below), independently.
-#          FM_SUPERVISOR_BACKEND    supervisor pane BACKEND (tmux|herdr;
+#          FM_SUPERVISOR_BACKEND    supervisor pane BACKEND (tmux|herdr|jcode-api;
+#                                   jcode-api has a jcode SESSION ID as its target and
+#                                   delivers by hidden system reminder, never keystrokes;
 #                                   override; otherwise auto-discovered the same
 #                                   way bin/fm-backend.sh's fm_backend_detect
 #                                   resolves the runtime firstmate itself is
@@ -175,6 +177,13 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 # shellcheck source=bin/fm-backend.sh
 . "$FM_DAEMON_DIR/fm-backend.sh"
 
+# The jcode harness API client (fm_jcode_api) behind the jcode-api supervisor
+# backend, and the lock-owner session id the backend is pinned to.
+# shellcheck source=bin/fm-jcode-lib.sh
+. "$FM_DAEMON_DIR/fm-jcode-lib.sh"
+# shellcheck source=bin/fm-session-lock-lib.sh
+. "$FM_DAEMON_DIR/fm-session-lock-lib.sh"
+
 # Canonical construction and parsing for every Firstmate operational input.
 # shellcheck source=bin/fm-operational-input.sh
 . "$FM_DAEMON_DIR/fm-operational-input.sh"
@@ -210,7 +219,7 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 # harness-verification discipline. Selecting one refuses loudly at startup
 # instead of silently running tmux primitives against a pane that is not a tmux
 # pane.
-FM_SUPERVISOR_SUPPORTED_BACKENDS="tmux herdr"
+FM_SUPERVISOR_SUPPORTED_BACKENDS="tmux herdr jcode-api"
 INJECT_SKIP_DEFAULT="heartbeat"
 STALE_ESCALATE_SECS_DEFAULT=240
 ESCALATE_BATCH_SECS_DEFAULT=90
@@ -711,6 +720,50 @@ fm_daemon_primary_harness() {
     [ -n "$FM_DAEMON_PRIMARY_HARNESS" ] || FM_DAEMON_PRIMARY_HARNESS=unknown
   fi
   printf '%s' "$FM_DAEMON_PRIMARY_HARNESS"
+}
+
+# Whether the supervisor target resolves. The jcode-api backend's target is a
+# session id the daemon lists, never a pane (bin/fm-jcode-api.mjs session-exists).
+sup_target_exists() {  # <backend> <target>
+  if [ "$1" = jcode-api ]; then
+    fm_jcode_api session-exists "$2" >/dev/null 2>&1
+    return
+  fi
+  fm_backend_target_exists "$1" "$2"
+}
+
+# Deliver one away digest to the lock-owning jcode session as a hidden system
+# reminder carrying only the record doorbell, never keystrokes into a pane.
+# Sets INJECT_LAST_FAILURE and returns 1 when the digest must stay buffered.
+inject_jcode_api() {  # <body> <state> <target>
+  local body=$1 state=$2 target=$3 owner status doorbell
+  owner=$(fm_session_lock_recorded_session_id "$state" 2>/dev/null) || owner=
+  if [ -z "$owner" ] || [ "$owner" != "$target" ]; then
+    INJECT_LAST_FAILURE="jcode supervisor session $target is not the lock-owning session recorded in $state/.lock-session"
+    log "inject failed: $INJECT_LAST_FAILURE"
+    return 1
+  fi
+  sup_target_exists jcode-api "$target" \
+    || { INJECT_LAST_FAILURE="supervisor target $target not found on jcode-api"; log "inject failed: $INJECT_LAST_FAILURE"; return 1; }
+  status=$(fm_jcode_api status "$target" 2>/dev/null) \
+    || { INJECT_LAST_FAILURE="could not read the status of jcode session $target"; log "inject failed: $INJECT_LAST_FAILURE"; return 1; }
+  if [ "$status" = running ]; then
+    INJECT_LAST_FAILURE="deferred: supervisor session busy (agent mid-turn)"
+    log "inject $INJECT_LAST_FAILURE"
+    return 1
+  fi
+  if ! fm_operational_record_write "$state" away-supervisor "$body" doorbell; then
+    INJECT_LAST_FAILURE="could not publish the away-supervisor record under $state"
+    log "inject failed: $INJECT_LAST_FAILURE"
+    return 1
+  fi
+  INJECT_SUBMIT_ATTEMPTED=1
+  if printf '%s' "$doorbell" | fm_jcode_api remind "$target" >/dev/null 2>&1; then
+    return 0
+  fi
+  INJECT_LAST_FAILURE="the jcode harness API did not accept the reminder for session $target"
+  log "inject failed: $INJECT_LAST_FAILURE"
+  return 1
 }
 
 pane_is_busy() {  # <target> [backend]
@@ -1467,6 +1520,10 @@ inject_msg() {  # <message> [state]
   # its backend. Falls back to tmux when unset (sourced/test contexts that never
   # ran fm_super_main's startup discovery), matching this function's default.
   backend="${FM_SUPERVISOR_BACKEND:-tmux}"
+  if [ "$backend" = jcode-api ]; then
+    inject_jcode_api "$body" "$state" "$target"
+    return
+  fi
   fm_backend_target_exists "$backend" "$target" \
     || { INJECT_LAST_FAILURE="supervisor target $target not found on $backend"; return 1; }
   # (3) Busy-guard: never inject into an in-use supervisor pane.
@@ -1848,6 +1905,37 @@ fm_super_main() {
       backend_source="FALLBACK($FM_SUPERVISOR_BACKEND_DEFAULT)"
     fi
   fi
+  # A jcode primary never uses a pane: its tool shells descend from the shared
+  # jcode server, so env-discovered panes can belong to another session. The
+  # backend is jcode-api and the target the lock-owning session id (an explicit
+  # FM_SUPERVISOR_TARGET must name that same id; otherwise it is this shell's
+  # trusted JCODE_SESSION_ID). Anything else is refused.
+  if [ "$(fm_daemon_primary_harness)" = jcode ]; then
+    local jcode_owner
+    if [ -n "${FM_SUPERVISOR_BACKEND:-}" ] && [ "$FM_SUPERVISOR_BACKEND" != jcode-api ]; then
+      echo "error: a jcode primary is supervised through the jcode harness API, never a '$FM_SUPERVISOR_BACKEND' pane; unset FM_SUPERVISOR_BACKEND" >&2
+      log "startup failed: pane backend '$FM_SUPERVISOR_BACKEND' refused on a jcode primary"
+      fm_lock_release "$LOCK" 2>/dev/null || true
+      rm -f "$PIDFILE" 2>/dev/null || true
+      exit 1
+    fi
+    if [ -n "${FM_SUPERVISOR_TARGET:-}" ]; then
+      jcode_owner=$(fm_session_lock_jcode_owner_id "$STATE" 0) || jcode_owner=
+      [ "$jcode_owner" = "$FM_SUPERVISOR_TARGET" ] || jcode_owner=
+    else
+      jcode_owner=$(fm_session_lock_jcode_owner_id "$STATE" 1) || jcode_owner=
+    fi
+    if [ -z "$jcode_owner" ]; then
+      echo "error: the jcode supervisor session must be the lock-owning primary session recorded in $STATE/.lock-session and match the trusted session id" >&2
+      log "startup failed: no lock-owning jcode session to supervise"
+      fm_lock_release "$LOCK" 2>/dev/null || true
+      rm -f "$PIDFILE" 2>/dev/null || true
+      exit 1
+    fi
+    FM_SUPERVISOR_BACKEND=jcode-api
+    FM_SUPERVISOR_TARGET=$jcode_owner
+    backend_source="jcode primary"
+  fi
   discovered_backend=$(discover_supervisor_backend) || true
   FM_SUPERVISOR_BACKEND="$discovered_backend"
   local BACKEND="$FM_SUPERVISOR_BACKEND"
@@ -1858,7 +1946,7 @@ fm_super_main() {
   # harness-verification discipline). This is the clear refusal the task calls
   # for, instead of a confusing "does not resolve to a tmux pane" error.
   if ! fm_backend_list_contains "$FM_SUPERVISOR_SUPPORTED_BACKENDS" "$BACKEND"; then
-    echo "error: away-mode daemon does not support supervisor backend '$BACKEND' yet (supported: $FM_SUPERVISOR_SUPPORTED_BACKENDS); set FM_SUPERVISOR_BACKEND=tmux|herdr and FM_SUPERVISOR_TARGET to run firstmate's own pane under a supported backend" >&2
+    echo "error: away-mode daemon does not support supervisor backend '$BACKEND' yet (supported: $FM_SUPERVISOR_SUPPORTED_BACKENDS); set FM_SUPERVISOR_BACKEND=tmux|herdr|jcode-api and FM_SUPERVISOR_TARGET to run firstmate's own pane under a supported backend" >&2
     log "startup failed: unsupported supervisor backend '$BACKEND' (source=$backend_source)"
     fm_lock_release "$LOCK" 2>/dev/null || true
     rm -f "$PIDFILE" 2>/dev/null || true
@@ -1882,7 +1970,10 @@ fm_super_main() {
       target_source="FALLBACK(firstmate:0)"
     fi
   fi
-  if discovered=$(discover_supervisor_target); then
+  if [ "$BACKEND" = jcode-api ]; then
+    discovered=$FM_SUPERVISOR_TARGET
+    target_source="jcode lock owner"
+  elif discovered=$(discover_supervisor_target); then
     : # resolved cleanly
   else
     echo "warn: could not auto-discover supervisor pane (no FM_SUPERVISOR_TARGET, TMUX_PANE, or HERDR_ENV/HERDR_PANE_ID); falling back to '$discovered' — verify this is firstmate's pane" >&2
@@ -1893,7 +1984,7 @@ fm_super_main() {
   # --- validate supervisor target at startup (a missing target is a typo) ---
   # Dispatch through bin/fm-backend.sh so each supervisor pane is checked by
   # its backend.
-  if ! fm_backend_target_exists "$BACKEND" "$TARGET"; then
+  if ! sup_target_exists "$BACKEND" "$TARGET"; then
     echo "error: supervisor target '$TARGET' does not resolve to a $BACKEND pane; set FM_SUPERVISOR_TARGET" >&2
     log "startup failed: target '$TARGET' not found (backend=$BACKEND)"
     fm_lock_release "$LOCK" 2>/dev/null || true
@@ -1961,7 +2052,7 @@ fm_super_main() {
     # has nowhere to go, and firstmate itself is the consumer of escalations.
     # Catch-up signals persist in state/*.status and flow on the next run, so
     # this delays rather than loses work.
-    if ! fm_backend_target_exists "$BACKEND" "$TARGET"; then
+    if ! sup_target_exists "$BACKEND" "$TARGET"; then
       log "warn: supervisor target '$TARGET' gone; backing off ${INJECT_FAIL_SLEEP}s, will retry"
       # Flush is pointless with no pane; preserve any buffered escalations.
       sleep "$INJECT_FAIL_SLEEP"
