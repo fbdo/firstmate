@@ -780,6 +780,19 @@ EOF
     *) fail "the brief turn's hooks must advance the busy record, got '$(fm_busy_record_read "$home/state" "$id")'" ;;
   esac
   pass "fm-spawn: the jcode session is created and bound before launch, and the brief goes out only after the client attaches"
+
+  # Tool commands run under the daemon, not the pane, so the trailer strip must
+  # reach the worktree through its own git config rather than the pane environment.
+  [ "$(git -C "$wt" config --worktree --get core.hooksPath)" = "$(CDPATH='' cd -- "$home/state/$id.git-hooks" && pwd -P)" ] \
+    || fail "a jcode worker's worktree must name the task's hooks directory in its own git config"
+  printf 'x\n' >> "$wt/jcode-strip.txt"
+  git -C "$wt" add jcode-strip.txt
+  env -u GIT_CONFIG_COUNT -u GIT_CONFIG_KEY_0 -u GIT_CONFIG_VALUE_0 -u GIT_CONFIG_PARAMETERS \
+    git -C "$wt" commit -q --trailer 'Co-authored-by: Claude <noreply@anthropic.com>' -m 'jcode worker commit' \
+    || fail "a commit in the jcode worktree failed"
+  assert_not_contains "$(git -C "$wt" log -1 --format=%B)" "noreply@anthropic.com" \
+    "the AI trailer must be stripped from a jcode worker commit made with no pane environment"
+  pass "fm-spawn: a jcode worker's commits are stripped of AI trailers with no pane environment"
 }
 
 test_pane_worker_memory_flag() {

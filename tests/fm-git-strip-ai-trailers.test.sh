@@ -494,7 +494,57 @@ test_push_guard_install_runs_the_guard_before_chaining() {
   pass "install --push-guard writes a read-only pre-push that runs the guard before chaining"
 }
 
+# A jcode worker's tool commands run under the shared daemon and never see the
+# pane's GIT_CONFIG_* environment, so --worktree-config records the hooks
+# directory in the worktree's own git config. No environment variable is set in
+# any command below.
+test_worktree_config_covers_a_linked_worktree_without_environment() {
+  local repo wt other hooks guard bare body out rc
+  repo="$TMP_ROOT/wtcfg-main"
+  make_repo "$repo"
+  printf '#!/bin/sh\ntouch "%s/wtcfg-repo-commit-msg.ran"\n' "$TMP_ROOT" >"$repo/.git/hooks/commit-msg"
+  chmod +x "$repo/.git/hooks/commit-msg"
+  wt="$TMP_ROOT/wtcfg-linked"
+  git -C "$repo" worktree add -q -b wtcfg-branch "$wt" || fail "could not add the linked worktree"
+  other="$TMP_ROOT/wtcfg-other"
+  git -C "$repo" worktree add -q -b wtcfg-other "$other" || fail "could not add the second worktree"
+  bare="$TMP_ROOT/wtcfg-origin.git"
+  git init -q --bare "$bare"
+  git -C "$repo" remote add origin "file://$bare"
+  guard="$TMP_ROOT/wtcfg-guard"
+  "$ROOT/bin/fm-git-push-guard.sh" write "$guard" "$repo" fm/t1 fm/ || fail "guard write failed"
+  hooks="$TMP_ROOT/wtcfg-hooks"
+  "$STRIP" install --worktree-config --push-guard "$guard" "$hooks" "$wt" || fail "install --worktree-config should succeed"
+
+  printf 'note\n' >>"$wt/README.md"
+  git -C "$wt" add README.md
+  git -C "$wt" commit -q --trailer 'Co-authored-by: Claude <noreply@anthropic.com>' -m 'fix: environment-free strip' || fail "commit failed in the covered worktree"
+  body=$(git -C "$wt" log -1 --format=%B)
+  assert_not_contains "$body" "noreply@anthropic.com" "the AI trailer reached a commit made with no GIT_CONFIG environment"
+  assert_contains "$body" "fix: environment-free strip" "the typed subject was lost"
+  assert_present "$TMP_ROOT/wtcfg-repo-commit-msg.ran" "the repository's own commit-msg hook was not chained"
+
+  rc=0
+  out=$(git -C "$wt" push origin HEAD:refs/heads/main 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "the push guard let a push to origin through with no GIT_CONFIG environment"
+  assert_contains "$out" "fm-git-push-guard: refused:" "the guard did not run for an environment-free push"
+
+  printf 'note\n' >>"$other/README.md"
+  git -C "$other" add README.md
+  git -C "$other" commit -q --trailer 'Co-authored-by: Claude <noreply@anthropic.com>' -m 'fix: uncovered worktree' || fail "commit failed in the other worktree"
+  assert_contains "$(git -C "$other" log -1 --format=%B)" "noreply@anthropic.com" "another worktree of the repository must not be covered"
+
+  "$STRIP" uninstall-worktree "$hooks" "$wt" || fail "uninstall-worktree failed"
+  [ -z "$(git -C "$wt" config --worktree --get core.hooksPath 2>/dev/null)" ] || fail "uninstall-worktree left core.hooksPath behind"
+  printf 'more\n' >>"$wt/README.md"
+  git -C "$wt" add README.md
+  git -C "$wt" commit -q --trailer 'Co-authored-by: Claude <noreply@anthropic.com>' -m 'fix: after uninstall' || fail "commit after uninstall failed"
+  assert_contains "$(git -C "$wt" log -1 --format=%B)" "noreply@anthropic.com" "the worktree must be uncovered after uninstall"
+  pass "install --worktree-config strips trailers, chains the repository hook, and runs the push guard with no environment; uninstall-worktree removes it"
+}
+
 test_cursor_trailer_does_not_reach_the_commit_object
+test_worktree_config_covers_a_linked_worktree_without_environment
 test_commandcode_trailer_is_stripped
 test_human_coauthor_is_kept
 test_human_at_a_vendor_domain_is_kept

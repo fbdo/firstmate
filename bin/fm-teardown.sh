@@ -3701,6 +3701,10 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" \
     "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend"
   remove_harness_worktree_wiring "$WT"
+  # A jcode task recorded its hooks directory in the worktree's git config
+  # (fm-git-strip-ai-trailers.sh --worktree-config); a pooled worktree must not
+  # keep pointing at the retired task's state.
+  "$SCRIPT_DIR/fm-git-strip-ai-trailers.sh" uninstall-worktree "$STATE/$ID.git-hooks" "$WT" 2>/dev/null || true
   # Kills remaining processes in the worktree (including the agent), resets, returns
   # to pool. treehouse resolves the pool from the working directory, so run it from
   # the project. teardown_treehouse_return tolerates transient and stale git locks

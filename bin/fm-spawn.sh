@@ -3839,10 +3839,6 @@ if [ "$KIND" = ship ]; then
       echo "error: --yolo on is refused for $ID: $PROJ_NAME is registered forge=external, where firstmate can neither observe nor perform the review tool's approval or merge; spawn with --yolo off" >&2
       exit 1
     fi
-    if [ "$HARNESS" = jcode ]; then
-      echo "error: $ID cannot launch on jcode: $PROJ_NAME is registered forge=external, whose push guard reaches the worker through its pane environment, and jcode tool commands run under the shared jcode daemon instead; select another harness for this task" >&2
-      exit 1
-    fi
     fm_external_review_adapter_body "$CONFIG" >/dev/null || exit 1
     fm_external_review_backup "$CONFIG" || exit 1
     EXTERNAL_REVIEW=1
@@ -5990,6 +5986,12 @@ EOF
 # home that keeps trailers gets a commit-msg wrapper that only chains.
 GIT_HOOKS_DIR="$STATE_REAL/$ID.git-hooks"
 GIT_HOOKS_INSTALLED=0
+# jcode tool commands are children of the shared daemon, so the GIT_CONFIG_*
+# pane environment never reaches them: the hooks directory is also recorded in
+# the worktree's own git config (fm-git-strip-ai-trailers.sh --worktree-config),
+# which covers the pane and the native backend alike, push guard included.
+GIT_HOOKS_WTCFG=()
+[ "$HARNESS" != jcode ] || GIT_HOOKS_WTCFG=(--worktree-config)
 if [ "$EXTERNAL_REVIEW" = 1 ]; then
   PUSH_GUARD_FILE="$STATE_REAL/$ID.push-guard"
   guard_args=("$PUSH_GUARD_FILE" "$WT" "$BRANCH" "$(fm_ship_branch_prefix "$BRANCH" "$ID")")
@@ -5997,14 +5999,14 @@ if [ "$EXTERNAL_REVIEW" = 1 ]; then
   strip_args=()
   [ "$KEEP_AI_TRAILERS" = 0 ] || strip_args=(--no-strip)
   { "$FM_ROOT/bin/fm-git-push-guard.sh" write "${guard_args[@]}" \
-    && "$FM_ROOT/bin/fm-git-strip-ai-trailers.sh" install "${strip_args[@]+"${strip_args[@]}"}" \
+    && "$FM_ROOT/bin/fm-git-strip-ai-trailers.sh" install "${strip_args[@]+"${strip_args[@]}"}" "${GIT_HOOKS_WTCFG[@]+"${GIT_HOOKS_WTCFG[@]}"}" \
       --push-guard "$PUSH_GUARD_FILE" "$GIT_HOOKS_DIR" "$WT"; } || {
     echo "error: could not install the external-review push guard hooks for $ID" >&2
     exit 1
   }
   GIT_HOOKS_INSTALLED=1
 elif [ "$KEEP_AI_TRAILERS" = 0 ]; then
-  "$FM_ROOT/bin/fm-git-strip-ai-trailers.sh" install "$GIT_HOOKS_DIR" "$WT" || {
+  "$FM_ROOT/bin/fm-git-strip-ai-trailers.sh" install "${GIT_HOOKS_WTCFG[@]+"${GIT_HOOKS_WTCFG[@]}"}" "$GIT_HOOKS_DIR" "$WT" || {
     echo "error: could not install the AI-trailer strip hooks for $ID" >&2
     exit 1
   }

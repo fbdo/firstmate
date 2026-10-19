@@ -31,6 +31,19 @@
 #       the pre-push wrapper run bin/fm-git-push-guard.sh on it first, with
 #       git's arguments and ref lines, chaining to the repository's pre-push
 #       hook only when the guard passes (that script owns the rules).
+#   fm-git-strip-ai-trailers.sh install --worktree-config [...] <hooks-dir> <worktree>
+#       For a runtime whose tool commands do not inherit the pane environment
+#       (jcode: tools are children of the shared daemon). After the normal
+#       install it also records core.hooksPath=<hooks-dir> in the worktree's own
+#       git config (extensions.worktreeConfig plus `git config --worktree`), so
+#       every git command run in that worktree finds the hooks without any
+#       environment. The wrappers then chain to the repository's own hooks
+#       through a path baked at install time (its local or global
+#       core.hooksPath, else the common hooks directory), because the
+#       worktree's core.hooksPath now names this directory.
+#   fm-git-strip-ai-trailers.sh uninstall-worktree <hooks-dir> <worktree>
+#       Remove that worktree-config entry, only when it still names <hooks-dir>.
+#       Teardown runs it before the worktree returns to its pool.
 #   fm-git-strip-ai-trailers.sh env-file <hooks-dir> <out-file>
 #       Write <out-file> as one plain export statement that appends
 #       core.hooksPath=<hooks-dir> after the GIT_CONFIG_COUNT entries this
@@ -82,7 +95,8 @@ usage() {
   cat >&2 <<'EOF'
 usage:
   fm-git-strip-ai-trailers.sh <msgfile>
-  fm-git-strip-ai-trailers.sh install [--no-strip] [--push-guard <guard-file>] <hooks-dir> <worktree>
+  fm-git-strip-ai-trailers.sh install [--no-strip] [--worktree-config] [--push-guard <guard-file>] <hooks-dir> <worktree>
+  fm-git-strip-ai-trailers.sh uninstall-worktree <hooks-dir> <worktree>
   fm-git-strip-ai-trailers.sh env-file <hooks-dir> <out-file>
 EOF
   exit 2
@@ -180,7 +194,20 @@ write_executable() {
 # so the wrapper runs none; any other failure reruns the lookup to show git's
 # error and refuses.
 runtime_chain_body() {
-  local ours=$1
+  local ours=$1 static_orig=${2-}
+  if [ -n "$static_orig" ]; then
+    # Worktree-config mode: the lookup would find this directory again, so the
+    # repository's own hooks directory was baked in at install time. "-" means
+    # the repository sets an empty core.hooksPath, which is no hooks at all.
+    cat <<EOF
+orig=$(quote_for_hook "$static_orig")
+name=\${0##*/}
+if [ "\$orig" != - ] && [ -x "\$orig/\$name" ]; then
+  exec "\$orig/\$name" "\$@"
+fi
+EOF
+    return 0
+  fi
   cat <<EOF
 ours=$(quote_for_hook "$ours")
 case \${GIT_CONFIG_COUNT:-} in
@@ -273,8 +300,38 @@ write_env_file() {
   fi
 }
 
+# The repository's own hooks directory for worktree-config mode, read before
+# this launch's core.hooksPath is recorded: its local or global core.hooksPath
+# (relative values resolve against the worktree, as git runs hooks there), else
+# the common hooks directory. A stale entry naming this directory is ignored.
+# Prints "-" for an explicitly empty core.hooksPath.
+baked_repo_hooks() {  # <worktree> <ours>
+  local wt=$1 ours=$2 value common
+  if value=$(cd "$wt" && unset GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT && git config --get --type=path core.hooksPath 2>/dev/null); then
+    if [ -z "$value" ]; then
+      printf -- '-'
+      return 0
+    fi
+    if [ "$value" != "$ours" ]; then
+      case "$value" in
+      /*) printf '%s' "$value" ;;
+      *) printf '%s/%s' "$wt" "$value" ;;
+      esac
+      return 0
+    fi
+  fi
+  common=$(cd "$wt" && unset GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT && git rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 1
+  printf '%s/hooks' "$common"
+}
+
 install_hooks() {
-  local hooks_dir=$1 wt=$2 strip=${3:-1} guard_src=${4:-} name strip_line guard_file guard_cmd
+  local hooks_dir=$1 wt=$2 strip=${3:-1} guard_src=${4:-} wtcfg=${5:-0} name strip_line guard_file guard_cmd static_orig=''
+  if [ "$wtcfg" = 1 ]; then
+    wt=$(CDPATH='' cd -- "$wt" 2>/dev/null && pwd -P) || {
+      echo "error: worktree is not a directory: $2" >&2
+      return 1
+    }
+  fi
   [ -n "$hooks_dir" ] && [ -n "$wt" ] || usage
   if [ -n "$guard_src" ] && { [ ! -f "$guard_src" ] || [ ! -r "$guard_src" ]; }; then
     echo "error: push guard file is not a readable regular file: $guard_src" >&2
@@ -293,6 +350,12 @@ install_hooks() {
   mkdir -p "$hooks_dir" || return 1
   chmod 700 "$hooks_dir" 2>/dev/null || true
   hooks_dir=$(CDPATH='' cd -- "$hooks_dir" && pwd -P) || return 1
+  if [ "$wtcfg" = 1 ]; then
+    static_orig=$(baked_repo_hooks "$wt" "$hooks_dir") || {
+      echo "error: cannot resolve the repository's hooks directory for $wt" >&2
+      return 1
+    }
+  fi
 
   strip_line=
   [ "$strip" = 0 ] || strip_line="$(quote_for_hook "$SELF") \"\$1\" || exit \$?"
@@ -300,7 +363,7 @@ install_hooks() {
 #!/usr/bin/env bash
 set -u
 $strip_line
-$(runtime_chain_body "$hooks_dir")
+$(runtime_chain_body "$hooks_dir" "$static_orig")
 EOF
 
   if [ -n "$guard_src" ]; then
@@ -320,7 +383,7 @@ else
   $guard_cmd "\$@" </dev/null || exit 1
   exec 0</dev/null
 fi
-$(runtime_chain_body "$hooks_dir")
+$(runtime_chain_body "$hooks_dir" "$static_orig")
 EOF
   fi
 
@@ -329,19 +392,42 @@ EOF
     write_executable "$hooks_dir/$name" <<EOF
 #!/usr/bin/env bash
 set -u
-$(runtime_chain_body "$hooks_dir")
+$(runtime_chain_body "$hooks_dir" "$static_orig")
 EOF
   done
   chmod 500 "$hooks_dir"
+  if [ "$wtcfg" = 1 ]; then
+    git -C "$wt" config extensions.worktreeConfig true &&
+      git -C "$wt" config --worktree core.hooksPath "$hooks_dir" || {
+      echo "error: could not record core.hooksPath in the worktree config of $wt" >&2
+      return 1
+    }
+  fi
+}
+
+# Remove the worktree-config entry install --worktree-config recorded, only
+# while it still names <hooks-dir>. A missing worktree or entry is success.
+uninstall_worktree() {
+  local hooks_dir=$1 wt=$2 current
+  [ -n "$hooks_dir" ] && [ -n "$wt" ] || usage
+  [ -d "$wt" ] || return 0
+  hooks_dir=$(CDPATH='' cd -- "$hooks_dir" 2>/dev/null && pwd -P) || hooks_dir=$1
+  current=$(git -C "$wt" config --worktree --get core.hooksPath 2>/dev/null) || return 0
+  [ "$current" = "$hooks_dir" ] || return 0
+  git -C "$wt" config --worktree --unset-all core.hooksPath
 }
 
 CMD=${1:-}
 case "$CMD" in
 install)
   shift
-  strip=1 guard=
+  strip=1 guard= wtcfg=0
   while [ "$#" -gt 2 ]; do
     case "$1" in
+    --worktree-config)
+      wtcfg=1
+      shift
+      ;;
     --no-strip)
       strip=0
       shift
@@ -356,7 +442,11 @@ install)
   done
   [ "$#" -eq 2 ] || usage
   unset GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0
-  install_hooks "$1" "$2" "$strip" "$guard"
+  install_hooks "$1" "$2" "$strip" "$guard" "$wtcfg"
+  ;;
+uninstall-worktree)
+  [ "$#" -eq 3 ] || usage
+  uninstall_worktree "$2" "$3"
   ;;
 env-file)
   [ "$#" -eq 3 ] || usage
