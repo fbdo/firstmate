@@ -238,6 +238,8 @@ WATCH_HOME_EXISTED=0
 . "$SCRIPT_DIR/fm-busy-lib.sh"
 # shellcheck source=bin/fm-jcode-lib.sh
 . "$SCRIPT_DIR/fm-jcode-lib.sh"
+# shellcheck source=bin/fm-token-headroom-lib.sh
+. "$SCRIPT_DIR/fm-token-headroom-lib.sh"
 # Steering-inbox loss detection: bin/fm-task-inbox-lib.sh owns the record,
 # doorbell, re-ring ladder, and unavailable-endpoint contracts; this watcher
 # supplies their live endpoint and busy checks plus wake emission
@@ -306,6 +308,15 @@ WATCHER_STALL_BOUND=$(fm_watcher_stall_bound "$POLL")
 HEARTBEAT=${FM_HEARTBEAT:-600}        # base seconds between heartbeat scans
 HEARTBEAT_MAX=${FM_HEARTBEAT_MAX:-7200}  # heartbeat backoff cap
 CHECK_INTERVAL=${FM_CHECK_INTERVAL:-300}  # seconds between *.check.sh sweeps
+# Token-saving cadence (bin/fm-token-headroom-lib.sh owns the state): while
+# state/.token-saving is set the poll and heartbeat stretch by this factor so
+# firstmate takes fewer turns; the base values come back when it clears.
+BASE_POLL=$POLL
+BASE_HEARTBEAT=$HEARTBEAT
+BASE_HEARTBEAT_MAX=$HEARTBEAT_MAX
+TOKEN_STRETCH=${FM_TOKEN_SAVING_STRETCH:-4}
+case "$TOKEN_STRETCH" in ''|*[!0-9]*|0) TOKEN_STRETCH=4 ;; esac
+TOKEN_CHECK_INTERVAL=${FM_TOKEN_CHECK_INTERVAL:-300}
 CHECK_TIMEOUT=${FM_CHECK_TIMEOUT:-30}     # seconds allowed per *.check.sh
 HOME_SUMMARY_INTERVAL=${FM_HOME_SUMMARY_INTERVAL:-300}
 case "$HOME_SUMMARY_INTERVAL" in
@@ -3027,6 +3038,36 @@ resurface_after_downtime() {
   wake "check: rearm-resurface"
 }
 
+# Token headroom: at most once per TOKEN_CHECK_INTERVAL read the Claude quota
+# (a --max-age reading, so this is cheap), enter or clear token-saving, stretch
+# or restore the cadence, re-prompt rate-limited workers whose window reset, and
+# surface each entry, exit, and pace warning as exactly one check: wake. The
+# pending notices are durable, so a wake lost before delivery is retried.
+token_headroom_cycle() {
+  local exited=0 text
+  if [ "$(age_of "$STATE/.last-token-check")" -ge "$TOKEN_CHECK_INTERVAL" ]; then
+    touch "$STATE/.last-token-check"
+    fm_token_headroom_refresh || true
+    [ "$FM_TOKEN_HEADROOM_TRANSITION" != exited ] || exited=1
+    fm_token_rate_limit_resume "$FM_HOME" "$SCRIPT_DIR/fm-send.sh" "$exited"
+  fi
+  if fm_token_saving_active; then
+    POLL=$((BASE_POLL * TOKEN_STRETCH))
+    HEARTBEAT=$((BASE_HEARTBEAT * TOKEN_STRETCH))
+    HEARTBEAT_MAX=$((BASE_HEARTBEAT_MAX * TOKEN_STRETCH))
+  else
+    POLL=$BASE_POLL
+    HEARTBEAT=$BASE_HEARTBEAT
+    HEARTBEAT_MAX=$BASE_HEARTBEAT_MAX
+  fi
+  if text=$(fm_token_notice_peek); then
+    text="check: token headroom: $text"
+    fm_wake_append check token-headroom "$text" || exit 1
+    fm_token_notice_clear
+    wake "$text"
+  fi
+}
+
 while :; do
   # Home-gone exit: a deleted home, state directory, or code root means this
   # watcher's world is gone (a torn-down temporary home or a discarded
@@ -3071,6 +3112,8 @@ while :; do
   # Opt-in Herdr project groups (docs/herdr-backend.md "Project groups"):
   # display-only tags and agents view, never a wake. Off costs one file test.
   [ ! -e "$CONFIG/herdr-project-groups" ] || FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-herdr-groups.sh" sync || true
+
+  token_headroom_cycle
 
   if [ "$(age_of "$STATE/home-summary.json")" -ge "$HOME_SUMMARY_INTERVAL" ]; then
     home_summary_refresh_detached

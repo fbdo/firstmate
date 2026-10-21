@@ -207,6 +207,10 @@
 #   A batch reports such a pair as `batch: DEFERRED` and exits 75 when nothing
 #   else failed. A relaunch and a --secondmate spawn are never counted against
 #   capacity.
+#   Token headroom: a fresh ship or scout spawn is deferred the same way (one
+#   `deferred:` line naming the reset time, exit 75) while the Claude 5-hour or
+#   7-day window is nearly spent (bin/fm-token-headroom-lib.sh owns the
+#   token-saving state). A relaunch is exempt so recovery still works.
 #   Memory headroom: just before that capacity check, a fresh ship or scout
 #   spawn on a host whose free memory plus swap is below the threshold
 #   (bin/fm-mem-headroom-lib.sh owns the verdict) is deferred the same way: one
@@ -816,6 +820,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-project-capacity-lib.sh"
 # shellcheck source=bin/fm-mem-headroom-lib.sh
 . "$SCRIPT_DIR/fm-mem-headroom-lib.sh"
+# shellcheck source=bin/fm-token-headroom-lib.sh
+. "$SCRIPT_DIR/fm-token-headroom-lib.sh"
 # shellcheck source=bin/fm-worker-account-lib.sh
 . "$SCRIPT_DIR/fm-worker-account-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
@@ -3632,6 +3638,11 @@ fi
 # short of free memory, so the launch cannot push the host into the OOM killer.
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && fm_mem_headroom_low; then
   echo "deferred: this host has $FM_MEM_HEADROOM_AVAILABLE_MIB MiB of free memory and swap, below the $FM_MEM_HEADROOM_THRESHOLD_MIB MiB a fresh worker needs (docs/configuration.md \"Memory headroom\"); task $ID was not launched and its backlog item stays queued - dispatch it again once memory frees" >&2
+  exit "$FM_PROJECT_CAPACITY_DEFER_EXIT"
+fi
+# Token headroom admission: the same deferral while token-saving is set.
+if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && fm_token_headroom_low; then
+  echo "deferred: the Claude $(fm_token_window_label "$FM_TOKEN_SAVING_WINDOW") token window has $FM_TOKEN_SAVING_PERCENT% left and resets at $FM_TOKEN_SAVING_RESET_ISO, so Firstmate is saving tokens (docs/configuration.md \"Token headroom\"); task $ID was not launched and its backlog item stays queued - dispatch it again after the reset" >&2
   exit "$FM_PROJECT_CAPACITY_DEFER_EXIT"
 fi
 SPAWN_PROJECT_CAPACITY=

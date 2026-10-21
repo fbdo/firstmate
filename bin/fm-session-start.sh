@@ -957,6 +957,21 @@ for status in "$STATE"/*.status; do
 done
 [ "$ORPHAN_STATUS_FOUND" -eq 1 ] || printf '(none)\n'
 
+subsection "Token headroom"
+# bin/fm-token-headroom-lib.sh owns the state; this reads the record only.
+if [ -e "$STATE/.token-saving" ]; then
+  printf 'SAVING - new spawns are deferred until the %s window resets (%s%% left at entry, resets at %s); the watcher runs a stretched cadence.\n' \
+    "$(sed -n 's/^window=//p' "$STATE/.token-saving" | head -n 1)" \
+    "$(sed -n 's/^percent=//p' "$STATE/.token-saving" | head -n 1)" \
+    "$(sed -n 's/^resets_at_iso=//p' "$STATE/.token-saving" | head -n 1)"
+else
+  printf 'normal (no token-saving state recorded)\n'
+fi
+for rl in "$STATE"/*.ratelimit; do
+  [ -e "$rl" ] || continue
+  printf 'rate-limited worker %s waits for the window reset (%s)\n' "$(basename "$rl" .ratelimit)" "$(sed -n 's/^reset=//p' "$rl" | head -n 1)"
+done
+
 subsection "AFK"
 # The away posture is the record (bin/fm-afk-contract.sh); the legacy flag
 # still marks a running daemon on the harnesses that launch one.

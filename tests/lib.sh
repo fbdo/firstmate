@@ -72,6 +72,8 @@ unset TASKS_AXI_FILE TASKS_AXI_BACKEND
 # verdicts never depend on how much memory the host has free at that moment.
 # tests/fm-mem-headroom.test.sh sets its own threshold and fake meminfo.
 export FM_MEM_HEADROOM_MIB=0
+# Token headroom reads the real quota-axi; tests opt in with their own shim.
+export FM_TOKEN_HEADROOM=0
 
 # Write the tracked default backlog configuration into a fixture home. Never copy
 # "$ROOT/.tasks.toml": an operator's primary checkout keeps a gitignored override
