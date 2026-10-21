@@ -90,6 +90,21 @@ delegate_to_secondmate() {
     "$target/bin/fm-jcode-hook.sh"
 }
 
+# A turn that ended in error. A provider rate limit is a declared wait for the
+# window reset (paused, with the reset time; the watcher re-prompts the worker
+# once the window resets - bin/fm-token-headroom-lib.sh); an auth failure or
+# stream-idle cancel is a blocked silent stop.
+report_turn_error() {
+  local reason
+  # shellcheck source=bin/fm-token-headroom-lib.sh
+  . "$SCRIPT_DIR/fm-token-headroom-lib.sh"
+  if reason=$(fm_jcode_rate_limit_reason "${JCODE_HOOK_ERROR:-}"); then
+    FM_STATE_OVERRIDE=$STATE fm_token_rate_limit_record "$STATE" "$TASK_ID" "$reason" || true
+  elif reason=$(fm_jcode_silent_stop_reason "${JCODE_HOOK_ERROR:-}"); then
+    fm_jcode_report_blocked "$STATE" "$TASK_ID" "$reason" || true
+  fi
+}
+
 # --- scope: a jcode worker of this home ---------------------------------------
 if [ -d "$STATE" ]; then
   # shellcheck source=bin/fm-jcode-lib.sh
@@ -151,9 +166,8 @@ EOF
     # The keeper owns busy/idle for a native (backend=jcode) task, so the hook
     # writes no busy record for it (amended D10); pane-backend jcode tasks keep it.
     if [ "$(fm_jcode_meta_value "$STATE/$TASK_ID.meta" backend)" = jcode ]; then
-      if [ "$EVENT" = turn_end ] && [ "${JCODE_HOOK_STATUS:-}" = error ] \
-        && STOP_REASON=$(fm_jcode_silent_stop_reason "${JCODE_HOOK_ERROR:-}"); then
-        fm_jcode_report_blocked "$STATE" "$TASK_ID" "$STOP_REASON" || true
+      if [ "$EVENT" = turn_end ] && [ "${JCODE_HOOK_STATUS:-}" = error ]; then
+        report_turn_error
       fi
       exit 0
     fi
@@ -165,9 +179,8 @@ EOF
         --source jcode-hook --event turn-end --turn-ended >/dev/null 2>&1 || true
       # A turn that ended in error on an auth failure or stream-idle cancel is a
       # silent stop: record it as blocked so firstmate is woken with the reason.
-      if [ "${JCODE_HOOK_STATUS:-}" = error ] \
-        && STOP_REASON=$(fm_jcode_silent_stop_reason "${JCODE_HOOK_ERROR:-}"); then
-        fm_jcode_report_blocked "$STATE" "$TASK_ID" "$STOP_REASON" || true
+      if [ "${JCODE_HOOK_STATUS:-}" = error ]; then
+        report_turn_error
       fi
     fi
     exit 0

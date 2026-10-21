@@ -1255,6 +1255,40 @@ The check bounds free memory only, never how many workers run, and it never paus
 Where memory cannot be measured, such as macOS or a container without `/proc/meminfo`, the check steps aside and the work proceeds.
 [`bin/fm-mem-headroom-lib.sh`](../bin/fm-mem-headroom-lib.sh) owns the verdict and its settings.
 
+## Token headroom (config/token-headroom / FM_TOKEN_HEADROOM_*)
+
+Anthropic limits a Claude subscription with a rolling 5-hour window and a rolling 7-day window.
+Firstmate reads both from `quota-axi --provider claude --json --max-age 5m`, so every poll reuses one reading, and enters a token-saving state when either window is nearly spent.
+Only the Claude provider is read today, and `fm_token_read` in the library is the single seam to extend for another provider.
+The thresholds are percent remaining, and each can be set as `FM_TOKEN_HEADROOM_<KEY>` or as a `<key>=<value>` line in the optional local, gitignored `config/token-headroom`, with the variable winning.
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `enter_five_hour` | 10 | enter at or under this on the 5-hour window |
+| `enter_seven_day` | 5 | enter at or under this on the 7-day window |
+| `exit_five_hour` | 20 | leave only above this on the 5-hour window |
+| `exit_seven_day` | 10 | leave only above this on the 7-day window |
+| `pace_warning` | 1 | `0` turns off the early pace warning |
+| `max_age` | 5m | quota-axi reuse bound |
+
+`FM_TOKEN_HEADROOM=0`, `enabled=0`, or a file whose first line is `off` disables the whole guard.
+The state is the durable record `state/.token-saving` (window, percent, reset time, entry time).
+It clears on its own once the triggering window's reset time has passed and a fresh reading is above the exit threshold, so a window that refills only partly does not flap.
+While it is set, `bin/fm-spawn.sh` defers a fresh ship or scout exactly like a memory deferral: nothing is created, the backlog item stays queued, one `deferred:` line names the reset time, and it exits 75.
+A relaunch and a secondmate spawn are never deferred, so recovery still works.
+The watcher stretches its poll and heartbeat by `FM_TOKEN_SAVING_STRETCH` (default 4) and posts exactly one `check:` wake on entry and one on exit.
+The session-start digest shows the state under "Token headroom".
+Running workers are never killed and keep their current turn.
+When quota-axi is missing, fails, or reports neither window, the guard steps aside and work proceeds.
+
+Pace warning: when a window is burning faster than an even pace and its projected exhaustion comes before its reset, the watcher posts one early `check:` wake per window period, before token-saving is reached.
+
+Rate-limit stalls: when a jcode worker's turn ends on a provider rate limit (Anthropic 429 `rate_limit_error`, "exceed your account's rate limit", or a `[jcode-provider-failover]` notice), `bin/fm-jcode-hook.sh` appends a declared `paused:` line with the reset time instead of `blocked:`, and records `state/<id>.ratelimit`.
+When the window resets, the watcher re-prompts that worker once through `bin/fm-send.sh`.
+If the reset time is unknown, the worker resumes when token-saving ends, or after six hours.
+Set jcode's `cross_provider_failover` to `manual` so a limit produces this error instead of a silent switch to a provider that rejects the Claude model.
+[`bin/fm-token-headroom-lib.sh`](../bin/fm-token-headroom-lib.sh) owns the verdict, the state, and these settings.
+
 ## Crew dispatch profiles (config/crew-dispatch.json)
 
 `config/crew-dispatch.json` is an optional local, gitignored file containing natural-language rules that firstmate reads before dispatching a crewmate or scout.

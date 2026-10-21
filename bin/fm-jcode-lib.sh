@@ -300,6 +300,22 @@ fm_jcode_silent_stop_reason() {  # <text>
   return 1
 }
 
+# Classify the same text as a provider rate-limit stall: Anthropic 429
+# rate_limit_error, "exceed your account's rate limit", or jcode's own
+# [jcode-provider-failover] / provider-failed notices. Prints one plain reason
+# and returns 0, or returns 1. Distinct from fm_jcode_silent_stop_reason because
+# the worker is healthy and only waits for the window reset
+# (bin/fm-token-headroom-lib.sh records and later resumes it).
+fm_jcode_rate_limit_reason() {  # <text>
+  case "$1" in
+    *rate_limit_error*|*"exceed your account's rate limit"*|*"exceed your account"*"rate limit"*|*"[jcode-provider-failover]"*|*"provider failed"*|*"Provider failed"*|*"429 Too Many Requests"*|*"HTTP 429"*)
+      printf '%s\n' "jcode hit a provider rate limit (usage window exhausted), so the worker stopped without reporting"
+      return 0
+      ;;
+  esac
+  return 1
+}
+
 # Record a silent stop as a `blocked` event in <state>/<id>.status so the
 # watcher's ordinary status signal wakes firstmate with the plain reason.
 # Idempotent: nothing is appended when the log's last line already carries this
