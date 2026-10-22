@@ -54,9 +54,9 @@ TARGET="jcode:$SID"
 fm_backend_validate jcode || fail "jcode must be a known backend"
 
 wait_for() {
-  local d=$1 i
+  local d=$1
   shift
-  for i in $(seq 1 100); do "$@" 2>/dev/null && return 0; sleep 0.1; done
+  for _ in $(seq 1 100); do if "$@" 2>/dev/null; then return 0; fi; sleep 0.1; done
   fail "timed out waiting for $d"
 }
 wait_for "keeper attach" test -f "$STATE/jcode/live/$SID"

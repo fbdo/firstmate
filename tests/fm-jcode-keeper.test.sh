@@ -28,8 +28,7 @@ DPID=
 start_daemon() {
   node "$FAKE_API" serve "$DSOCK" "$DDIR" >/dev/null 2>&1 &
   DPID=$!
-  local i
-  for i in $(seq 1 100); do [ -S "$DSOCK" ] && return 0; sleep 0.05; done
+  for _ in $(seq 1 100); do [ -S "$DSOCK" ] && return 0; sleep 0.05; done
   fail "fake daemon did not start"
 }
 cleanup_all() {
@@ -125,9 +124,9 @@ api() { node "$ROOT/bin/fm-jcode-api.mjs" --socket "$(run_of "$FMH")/api.sock" "
 JS="$FMH/state/jcode"
 dctl() { printf '%s\n' "$1" >>"$DDIR/ctl"; }
 wait_for() {  # <description> <command...>
-  local d=$1 i
+  local d=$1
   shift
-  for i in $(seq 1 100); do "$@" 2>/dev/null && return 0; sleep 0.1; done
+  for _ in $(seq 1 100); do if "$@" 2>/dev/null; then return 0; fi; sleep 0.1; done
   fail "timed out waiting for $d"
 }
 bind_task() {  # <task> <session>

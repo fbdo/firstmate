@@ -2400,7 +2400,7 @@ EOF
   local out; out=$(run_crew_state "$d" feat-g)
   assert_not_contains "$out" "source: run-step" "another branch's run not misattributed"
   assert_contains "$out" "source: status-log" "no own run -> falls back to status-log"
-  assert_contains "$out" "state: done" "falls back to the log verb"
+  assert_contains "$out" "state: awaiting-go" "falls back to the log verb (a no-PR no-mistakes done is the handoff)"
   pass "another branch's run is ignored, falls back"
 }
 
@@ -2478,7 +2478,7 @@ test_no_mistakes_prevalidation_done_stays_done() {
   FM_FAKE_BUSY=0
   arm_idle_record "$d/state" preval
   out=$(run_crew_state "$d" preval)
-  assert_contains "$out" "state: done" "no-mistakes pre-validation done: remains done"
+  assert_contains "$out" "state: awaiting-go" "no-mistakes pre-validation done: is the awaiting-go handoff"
   assert_not_contains "$out" "state: blocked" "pre-validation done: must not be the named-head gate"
   pass "no-mistakes pre-validation done: stays current-state done"
 }
@@ -2950,7 +2950,7 @@ test_newest_open_decision_supplies_the_reported_detail() {
 
 test_single_owner_terminal_declaration_supersedes_stale_decision() {
   reset_fakes
-  local d kind opener terminal out key expected
+  local d kind opener terminal out key expected want
   d=$(new_case terminal-stale-decision)
   make_repo_on_branch "$d/wt" fm/task
   make_fakebin "$d" >/dev/null
@@ -2962,7 +2962,10 @@ test_single_owner_terminal_declaration_supersedes_stale_decision() {
         printf '%s [key=choice]: an earlier decision\n%s: final outcome\nContinuation prose.\n\n' \
           "$opener" "$terminal" > "$d/state/task.status"
         out=$(run_crew_state "$d" task)
-        assert_contains "$out" "state: $terminal" "$kind terminal declaration supersedes stale $opener"
+        want=$terminal
+        # A no-mistakes ship's first no-PR done: is the implementation handoff (awaiting-go).
+        [ "$kind/$terminal" != ship/done ] || want=awaiting-go
+        assert_contains "$out" "state: $want" "$kind terminal declaration supersedes stale $opener"
         assert_contains "$out" "final outcome" "the terminal declaration supplies the detail"
         printf 'note: cleanup complete\n' >> "$d/state/task.status"
         out=$(run_crew_state "$d" task)

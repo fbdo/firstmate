@@ -91,8 +91,7 @@ test_hook_secondmate() {
   pass "hook: secondmate busy and idle are recorded without turn-ended"
 
   : >"$TMP_ROOT/mate-hook.log"
-  hook pre_tool swarm '{"action":"dm","to_swarm":"x"}' session_mate "$MATE"
-  [ $? -eq 0 ] || fail "the worker swarm fence must not apply to a secondmate session"
+  hook pre_tool swarm '{"action":"dm","to_swarm":"x"}' session_mate "$MATE" || fail "the worker swarm fence must not apply to a secondmate session"
   assert_contains "$(cat "$TMP_ROOT/mate-hook.log")" "event=pre_tool session=session_mate" "pre_tool is delegated to the mate dispatcher"
   assert_contains "$(cat "$TMP_ROOT/mate-hook.log")" "delegated=1" "the delegated marker is set"
   assert_contains "$(cat "$TMP_ROOT/mate-hook.log")" "home=$MATE" "FM_HOME names the mate"

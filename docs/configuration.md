@@ -1284,8 +1284,11 @@ When quota-axi is missing, fails, or reports neither window, the guard steps asi
 Pace warning: when a window is burning faster than an even pace and its projected exhaustion comes before its reset, the watcher posts one early `check:` wake per window period, before token-saving is reached.
 
 Rate-limit stalls: when a jcode worker's turn ends on a provider rate limit (Anthropic 429 `rate_limit_error`, "exceed your account's rate limit", or a `[jcode-provider-failover]` notice), `bin/fm-jcode-hook.sh` appends a declared `paused:` line with the reset time instead of `blocked:`, and records `state/<id>.ratelimit`.
-When the window resets, the watcher re-prompts that worker once through `bin/fm-send.sh`.
+When the window resets, that worker is re-prompted once through `bin/fm-send.sh`.
 If the reset time is unknown, the worker resumes when token-saving ends, or after six hours.
+The hook also starts a detached, home-scoped, single-instance waiter (`bin/fm-token-resume.sh`) that sleeps until the reset, runs the same recovery pass, queues one durable `check: token headroom` wake, and exits.
+This keeps recovery running when no watcher is armed, for example when the primary has had no turn since the wake that reported the pause.
+A live watcher and the waiter share one locked pass, so a worker is never re-prompted twice.
 Set jcode's `cross_provider_failover` to `manual` so a limit produces this error instead of a silent switch to a provider that rejects the Claude model.
 [`bin/fm-token-headroom-lib.sh`](../bin/fm-token-headroom-lib.sh) owns the verdict, the state, and these settings.
 

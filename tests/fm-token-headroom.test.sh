@@ -272,7 +272,7 @@ hook_error() {  # <primary> <error>
   local primary=$1
   env -u FM_HOME -u FM_STATE_OVERRIDE JCODE_HOOK_EVENT=turn_end JCODE_HOOK_SESSION_ID=session_r \
     JCODE_HOOK_CWD="$TMP_ROOT/${primary##*/}-wt" JCODE_HOOK_STATUS=error JCODE_HOOK_ERROR="$2" \
-    PATH="$FAKEBIN:$PATH" QUOTA_FIXTURE="$TMP_ROOT/q.json" FM_TOKEN_HEADROOM_NOW=$NOW FM_TOKEN_HEADROOM=1 \
+    PATH="$FAKEBIN:$PATH" QUOTA_FIXTURE="$TMP_ROOT/q.json" FM_TOKEN_HEADROOM_NOW=$NOW FM_TOKEN_HEADROOM=1 FM_TOKEN_RESUME_SPAWN="${HOOK_SPAWN:-0}" FM_TOKEN_RESUME_POLL=1 \
     "$primary/bin/fm-jcode-hook.sh" </dev/null
 }
 
@@ -336,7 +336,121 @@ test_rate_limit_resume_once() {
   pass "a rate-limited worker is re-prompted once after the reset, or on token-saving exit when the reset is unknown"
 }
 
+# --- detached resume waiter ---------------------------------------------------
+
+# resume_home <name> <reset-offset>: home with worker w1 rate-limited and a fake send.
+resume_home() {
+  local home
+  home=$(new_home "$1")
+  : > "$home/state/w1.meta"
+  printf 'reset=%s\nsince=%s\n' "$((NOW + $2))" "$NOW" > "$home/state/w1.ratelimit"
+  printf 'paused [at=%s]: jcode hit a provider rate limit; waiting for the provider rate-limit window to reset\n' "$NOW" > "$home/state/w1.status"
+  printf '#!/usr/bin/env bash\necho "${FM_HOME:-none} $*" >> "%s/sent.log"\n' "$home" > "$home/send.sh"
+  chmod +x "$home/send.sh"
+  printf '%s\n' "$home"
+}
+
+# resume_run <home> [args]: the waiter, with no watcher armed.
+resume_run() {
+  local home=$1
+  shift
+  env FM_TOKEN_HEADROOM=1 FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_CONFIG_OVERRIDE="$home/config" \
+    PATH="$FAKEBIN:$PATH" QUOTA_FIXTURE=/dev/null FM_TOKEN_HEADROOM_NOW="${NOW_OVERRIDE:-$NOW}" \
+    FM_TOKEN_RESUME_SEND="$home/send.sh" FM_TOKEN_RESUME_POLL=1 "$ROOT/bin/fm-token-resume.sh" "$@"
+}
+
+test_resume_waiter_without_watcher() {
+  local home sent
+  home=$(resume_home waiter 100)
+  sent="$home/sent.log"
+  resume_run "$home" --once
+  [ ! -e "$sent" ] || fail "waiter re-prompted before the reset"
+  [ -e "$home/state/w1.ratelimit" ] || fail "waiter dropped the record before the reset"
+  NOW_OVERRIDE=$((NOW + 200)) resume_run "$home" --once
+  [ "$(wc -l < "$sent")" -eq 1 ] || fail "waiter did not re-prompt exactly once"
+  grep -q "^$home w1 The provider rate-limit window has reset" "$sent" || fail "re-prompt not sent to w1 under this FM_HOME: $(cat "$sent")"
+  [ "$(grep -c 'token-headroom' "$home/state/.wake-queue")" -eq 1 ] || fail "expected exactly one durable wake: $(cat "$home/state/.wake-queue" 2>/dev/null)"
+  grep -q 're-prompted: w1' "$home/state/.wake-queue" || fail "wake does not name the worker"
+  [ ! -e "$home/state/w1.ratelimit" ] || fail "record survived the resume"
+  NOW_OVERRIDE=$((NOW + 400)) resume_run "$home" --once
+  [ "$(wc -l < "$sent")" -eq 1 ] && [ "$(wc -l < "$home/state/.wake-queue")" -eq 1 ] || fail "a second pass duplicated the prompt or wake"
+  pass "with no watcher armed, the waiter re-prompts a reset worker once and queues one durable wake"
+}
+
+test_resume_waiter_loop_exits_and_unlocks() {
+  local home
+  home=$(resume_home loop -1)
+  NOW_OVERRIDE=$((NOW + 100)) timeout 30 bash -c "ROOT='$ROOT' FAKEBIN='$FAKEBIN' NOW='$NOW' NOW_OVERRIDE='$((NOW + 100))'; $(declare -f resume_run); resume_run '$home'" \
+    || fail "looping waiter did not exit once nothing was left"
+  [ "$(wc -l < "$home/sent.log")" -eq 1 ] || fail "looping waiter did not re-prompt exactly once"
+  [ ! -d "$home/state/.token-resume.lock" ] || fail "waiter left its instance lock behind"
+  pass "the looping waiter resumes a due worker, exits when nothing is left, and releases its lock"
+}
+
+test_resume_waiter_single_instance_and_home_scoped() {
+  local home other holder
+  home=$(resume_home single 100)
+  other=$(resume_home otherhome 100)
+  mkdir "$home/state/.token-resume.lock"
+  sleep 30 &
+  holder=$!
+  printf '%s\n' "$holder" > "$home/state/.token-resume.lock/pid"
+  NOW_OVERRIDE=$((NOW + 200)) resume_run "$home" || true
+  kill "$holder" 2>/dev/null
+  [ ! -e "$home/sent.log" ] || fail "a second waiter ran while one held the instance lock"
+  rm -f "$home/state/.token-resume.lock/pid"
+  rmdir "$home/state/.token-resume.lock"
+  NOW_OVERRIDE=$((NOW + 200)) resume_run "$home" --once
+  [ -e "$home/sent.log" ] || fail "waiter did not run once the lock was free"
+  [ ! -e "$other/sent.log" ] && [ -e "$other/state/w1.ratelimit" ] || fail "waiter touched another home's rate-limited worker"
+  pass "the waiter is single-instance per home and never touches another home"
+}
+
+test_resume_waiter_alongside_watcher_pass() {
+  local home sent
+  home=$(resume_home both 100)
+  sent="$home/sent.log"
+  NOW_OVERRIDE=$((NOW + 200)) run "$home" /dev/null "fm_token_rate_limit_resume '$home' '$home/send.sh' 0" &
+  NOW_OVERRIDE=$((NOW + 200)) resume_run "$home" --once
+  wait
+  [ "$(wc -l < "$sent")" -eq 1 ] || fail "watcher pass plus waiter re-prompted $(wc -l < "$sent") times"
+  pass "a watcher pass racing the waiter re-prompts once"
+}
+
+test_resume_waiter_unknown_reset_fallback() {
+  local home
+  home=$(resume_home unknown 0)
+  printf 'reset=unknown\nsince=%s\n' "$NOW" > "$home/state/w1.ratelimit"
+  NOW_OVERRIDE=$((NOW + 100)) resume_run "$home" --once
+  [ ! -e "$home/sent.log" ] || fail "unknown reset resumed early"
+  NOW_OVERRIDE=$((NOW + 21600)) resume_run "$home" --once
+  [ "$(wc -l < "$home/sent.log")" -eq 1 ] || fail "unknown reset did not resume after six hours"
+  [ "$(grep -c 'token-headroom' "$home/state/.wake-queue")" -eq 1 ] || fail "no durable wake for the unknown-reset resume"
+  pass "an unknown reset resumes after six hours with one durable wake"
+}
+
+test_hook_starts_waiter() {
+  local primary
+  primary=$(make_hook_world hookspawn)
+  : > "$primary/state/w1.meta"
+  printf '#!/usr/bin/env bash\necho "$*" >> "%s/sent.log"\n' "$primary" > "$primary/bin/fm-send.sh"
+  chmod +x "$primary/bin/fm-send.sh"
+  quota_json 50 50 > "$TMP_ROOT/q.json"
+  # The reset is RESET5 (NOW+3600); the waiter's clock is already past it.
+  HOOK_SPAWN=1 hook_error "$primary" 'rate_limit_error' || fail "hook must exit 0"
+  for _ in $(seq 1 100); do [ -e "$primary/state/.token-resume.lock" ] && break; sleep 0.1; done
+  [ -e "$primary/state/w1.ratelimit" ] || fail "hook did not record the rate limit"
+  kill "$(cat "$primary/state/.token-resume.lock/pid" 2>/dev/null)" 2>/dev/null || true
+  pass "the hook launches the detached waiter when it records a rate limit"
+}
+
 test_entry_exit_and_hysteresis
+test_resume_waiter_without_watcher
+test_resume_waiter_loop_exits_and_unlocks
+test_resume_waiter_single_instance_and_home_scoped
+test_resume_waiter_alongside_watcher_pass
+test_resume_waiter_unknown_reset_fallback
+test_hook_starts_waiter
 test_config_thresholds
 test_unmeasurable_steps_aside
 test_pace_warning_once_per_window

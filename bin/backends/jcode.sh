@@ -122,13 +122,13 @@ fm_backend_jcode_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
 # Archive every recorded or live child of the worker that sits inside the task
 # worktree (D13); a child outside it is logged and left alone.
 fm_backend_jcode_archive_children() {  # (uses _JC_* from fm_backend_jcode_resolve)
-  local worktree child label dir status real kids rec
+  local worktree child label dir real kids rec
   worktree=$(fm_meta_get "$_JC_META" worktree)
   worktree=$(readlink -f -- "$worktree" 2>/dev/null || printf '%s' "$worktree")
   rec="$_JC_STATE/$(fm_meta_get "$_JC_META" endpoint_task_id).jcode-children"
   # Fold live children into the durable record first, so they pass the ownership guard.
   kids=$(fm_jcode_native_api "$_JC_META" children "$_JC_SESSION" 2>/dev/null || true)
-  while IFS=$'\t' read -r child label dir status; do
+  while IFS=$'\t' read -r child label dir _status; do
     [ -n "$child" ] || continue
     grep -q "^$child	" "$rec" 2>/dev/null || printf '%s\t%s\t%s\n' "$child" "$label" "$dir" >>"$rec"
   done <<<"$kids"

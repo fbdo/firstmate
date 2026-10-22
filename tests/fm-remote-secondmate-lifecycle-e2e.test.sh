@@ -1309,15 +1309,20 @@ FM_STATE_OVERRIDE="$WATCH_STATE" FM_SECONDMATE_LIVENESS_SECS=1 FM_POLL=1 \
   remote_env exec "$ROOT/bin/fm-watch.sh" \
   > "$TMP_ROOT/watch-liveness.out" 2> "$TMP_ROOT/watch-liveness.err" &
 watch_pid=$!
-watch_wait=0
-while kill -0 "$watch_pid" 2>/dev/null && [ "$watch_wait" -lt 1500 ]; do
-  sleep 0.02
-  watch_wait=$((watch_wait + 1))
+# The wake follows a real remote relaunch (fm-spawn --secondmate, the same
+# inheritance work the blocked-write wait above allows 30 s for), which the
+# watcher itself bounds at FM_SECONDMATE_LIVENESS_TIMEOUT (120 s by default).
+# Wait on the wall clock past that bound, so a slow runner cannot fail this
+# leg before the watcher's own timeout would.
+watch_start=$SECONDS
+while kill -0 "$watch_pid" 2>/dev/null && [ $((SECONDS - watch_start)) -lt 150 ]; do
+  sleep 0.2
 done
 if kill -0 "$watch_pid" 2>/dev/null; then
   kill "$watch_pid" 2>/dev/null || true
-  fail "the watcher did not exit on its auto-relaunch wake within the bound: $(cat "$TMP_ROOT/watch-liveness.out" "$TMP_ROOT/watch-liveness.err" 2>/dev/null)"
+  fail "the watcher did not exit on its auto-relaunch wake within $((SECONDS - watch_start))s: out=$(cat "$TMP_ROOT/watch-liveness.out" 2>/dev/null) err=$(cat "$TMP_ROOT/watch-liveness.err" 2>/dev/null) ledger=$(cat "$WATCH_STATE"/.secondmate-relaunch-ios 2>/dev/null) queue=$(cat "$WATCH_STATE/.wake-queue" 2>/dev/null)"
 fi
+echo "# liveness watcher leg took $((SECONDS - watch_start))s" >&2
 wait "$watch_pid" \
   || fail "the liveness watcher leg exited non-zero: $(cat "$TMP_ROOT/watch-liveness.err")"
 watch_pid=''

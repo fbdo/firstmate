@@ -99,10 +99,12 @@ cmd_open() {
     fm_backend_herdr_cli "$session" tab close "$tab" >/dev/null 2>&1 || true
     return 0
   fi
-  printf 'session=%s\ntab=%s\npane=%s\n' "$session" "$tab" "$pane" >"$REC.tmp.$$" && mv -f "$REC.tmp.$$" "$REC" || {
+  if printf 'session=%s\ntab=%s\npane=%s\n' "$session" "$tab" "$pane" >"$REC.tmp.$$" && mv -f "$REC.tmp.$$" "$REC"; then
+    :
+  else
     rm -f "$REC.tmp.$$"
     echo "warning: jcode viewer for $ID opened but could not be recorded" >&2
-  }
+  fi
   printf '%s:%s\n' "$session" "$pane"
 }
 

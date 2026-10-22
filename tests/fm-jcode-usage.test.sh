@@ -30,6 +30,7 @@ JSON
 esac
 SH
 chmod +x "$FB/jcode"
+# shellcheck disable=SC2119,SC2120 # callers pass flags only in some cases.
 usage() { env -u FM_HOME FM_HOME="$H" FM_CONFIG_OVERRIDE="$H/config" FM_STATE_OVERRIDE="$H/state" PATH="$FB:$PATH" "$ROOT/bin/fm-jcode-usage.sh" "$@"; }
 
 test_off_without_flag() {

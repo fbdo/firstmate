@@ -436,6 +436,7 @@ mkdir -p "$DATA/$ID"
 # scaffolded with --jcode carries the contract.
 JCODE_SUBAGENT_RULE=
 if [ "$JCODE_WORKER" -eq 1 ]; then
+  # shellcheck disable=SC2016 # backticks are literal text in the brief.
   JCODE_SUBAGENT_RULE='   You may start jcode subagents with your `swarm` tool when parallel work clearly helps this task. Keep at most 3 live at once. They run in this same worktree; never give them another directory, never message sessions outside your own subagents, and never label swarms. You remain responsible for their results: review what they changed before you rely on it. Wait for them inside your turn with `await_members`, or declare `paused:` while they run. Stop every subagent you started (`swarm stop`) before you append `done`, `failed`, or `needs-decision`.
 '
 fi
