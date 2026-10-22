@@ -45,6 +45,10 @@
 #   fm_token_notice_take        prints and removes pending notice texts, joined.
 #   fm_token_rate_limit_record <state> <id> <reason>
 #   fm_token_rate_limit_resume <fm-home> <send-script> <exited 0|1>
+#                               one pass under a short lock, shared by the
+#                               watcher and bin/fm-token-resume.sh so a worker is
+#                               re-prompted once; sets FM_TOKEN_RESUMED to the
+#                               ids it re-prompted.
 
 FM_TOKEN_HEADROOM_LIB_DIR="$(d=${BASH_SOURCE[0]%/*}; [ "$d" != "${BASH_SOURCE[0]}" ] || d=.; cd "${d:-/}" && pwd)"
 FM_TOKEN_HEADROOM_TRANSITION=none
@@ -59,6 +63,7 @@ FM_TOKEN_SEVEN_BURN=''
 FM_TOKEN_SAVING_WINDOW=''
 FM_TOKEN_SAVING_PERCENT=''
 FM_TOKEN_SAVING_RESET_ISO=''
+FM_TOKEN_RESUMED=''
 
 fm_token_state_dir() { printf '%s\n' "${FM_STATE_OVERRIDE:-${FM_HOME:-$FM_TOKEN_HEADROOM_LIB_DIR/..}/state}"; }
 fm_token_config_dir() { printf '%s\n' "${FM_CONFIG_OVERRIDE:-${FM_HOME:-$FM_TOKEN_HEADROOM_LIB_DIR/..}/config}"; }
@@ -297,8 +302,11 @@ fm_token_rate_limit_record() {  # <state-dir> <id> <reason>
 
 # Re-prompt, once, each worker whose rate-limit window has reset. A record with
 # an unknown reset resumes when token-saving ends (<exited> = 1) or after six
-# hours. Steers through the fm-send inbox path, never a raw key.
-fm_token_rate_limit_resume() {  # <fm-home> <send-script> <exited 0|1>
+# hours. Steers through the fm-send inbox path, never a raw key. The watcher and
+# bin/fm-token-resume.sh both call this; the whole pass runs under one mkdir lock
+# and each record is removed before the lock drops, so the second caller finds
+# nothing left to prompt.
+_fm_token_rate_limit_resume_locked() {  # <fm-home> <send-script> <exited 0|1>
   local home=$1 send=$2 exited=${3:-0} state f id reset since now due last
   state="$(fm_token_state_dir)"
   now=$(fm_token_now)
@@ -320,10 +328,26 @@ fm_token_rate_limit_resume() {  # <fm-home> <send-script> <exited 0|1>
         [ -e "$state/$id.meta" ] || { rm -f "$f"; continue; }
         if FM_HOME="$home" "$send" "$id" "The provider rate-limit window has reset. Continue your task from where you stopped." >/dev/null 2>&1; then
           rm -f "$f"
+          FM_TOKEN_RESUMED="${FM_TOKEN_RESUMED:+$FM_TOKEN_RESUMED }$id"
           printf 'working [at=%s]: provider rate-limit window reset, worker re-prompted to continue\n' "$now" >> "$state/$id.status"
         fi
         ;;
       *) rm -f "$f" ;;
     esac
   done
+}
+
+fm_token_rate_limit_resume() {  # <fm-home> <send-script> <exited 0|1>
+  local lock i=0 rc=0
+  FM_TOKEN_RESUMED=''
+  lock="$(fm_token_state_dir)/.ratelimit-resume.lock"
+  while ! mkdir "$lock" 2>/dev/null; do
+    if [ -n "$(find "$lock" -maxdepth 0 -mmin +2 2>/dev/null)" ]; then rmdir "$lock" 2>/dev/null || true; continue; fi
+    i=$((i + 1))
+    [ "$i" -lt 600 ] || return 1
+    sleep 0.1
+  done
+  _fm_token_rate_limit_resume_locked "$@" || rc=$?
+  rmdir "$lock" 2>/dev/null || true
+  return "$rc"
 }

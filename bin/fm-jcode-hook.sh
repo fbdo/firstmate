@@ -90,6 +90,17 @@ delegate_to_secondmate() {
     "$target/bin/fm-jcode-hook.sh"
 }
 
+# Keep the reset recovery alive past the watcher's exit: a detached, home-scoped,
+# single-instance waiter (bin/fm-token-resume.sh owns the contract) re-prompts
+# the worker at the reset even when no watcher is armed. FM_TOKEN_RESUME_SPAWN=0
+# turns the launch off.
+start_token_resume() {
+  [ "${FM_TOKEN_RESUME_SPAWN:-1}" != 0 ] || return 0
+  [ -x "$SCRIPT_DIR/fm-token-resume.sh" ] || return 0
+  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+    nohup "$SCRIPT_DIR/fm-token-resume.sh" >/dev/null 2>&1 </dev/null &
+}
+
 # A turn that ended in error. A provider rate limit is a declared wait for the
 # window reset (paused, with the reset time; the watcher re-prompts the worker
 # once the window resets - bin/fm-token-headroom-lib.sh); an auth failure or
@@ -99,7 +110,9 @@ report_turn_error() {
   # shellcheck source=bin/fm-token-headroom-lib.sh
   . "$SCRIPT_DIR/fm-token-headroom-lib.sh"
   if reason=$(fm_jcode_rate_limit_reason "${JCODE_HOOK_ERROR:-}"); then
-    FM_STATE_OVERRIDE=$STATE fm_token_rate_limit_record "$STATE" "$TASK_ID" "$reason" || true
+    if FM_STATE_OVERRIDE=$STATE fm_token_rate_limit_record "$STATE" "$TASK_ID" "$reason"; then
+      start_token_resume
+    fi
   elif reason=$(fm_jcode_silent_stop_reason "${JCODE_HOOK_ERROR:-}"); then
     fm_jcode_report_blocked "$STATE" "$TASK_ID" "$reason" || true
   fi
