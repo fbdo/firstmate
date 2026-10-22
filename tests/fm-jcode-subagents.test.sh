@@ -59,12 +59,11 @@ test_worker_fence() {
 }
 
 test_primary_and_unbound() {
-  hook pre_tool swarm '{"action":"spawn","prompt":"x"}' session_x "$PRIMARY"
-  [ $? -eq 2 ] || fail "the primary's swarm fence must stay on"
-  hook pre_tool swarm '{"action":"dm","to_swarm":"x"}' session_x "$TMP_ROOT"
-  [ $? -eq 0 ] || fail "an unbound session outside any home exits silently"
-  hook pre_tool swarm '{"action":"dm","to_swarm":"x"}' session_x "$WT"
-  [ $? -eq 0 ] || fail "an unbound session in a worktree is ignored"
+  local rc=0
+  hook pre_tool swarm '{"action":"spawn","prompt":"x"}' session_x "$PRIMARY" || rc=$?
+  [ "$rc" -eq 2 ] || fail "the primary's swarm fence must stay on"
+  hook pre_tool swarm '{"action":"dm","to_swarm":"x"}' session_x "$TMP_ROOT" || fail "an unbound session outside any home exits silently"
+  hook pre_tool swarm '{"action":"dm","to_swarm":"x"}' session_x "$WT" || fail "an unbound session in a worktree is ignored"
   pass "the primary fence is unchanged and unbound sessions are ignored"
 }
 

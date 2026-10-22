@@ -11,6 +11,7 @@ run jb1 proj --mode local-only --jcode || fail "scaffold with --jcode failed"
 run jb2 proj --mode local-only || fail "scaffold without --jcode failed"
 run jb3 proj --scout --jcode || fail "scout scaffold with --jcode failed"
 for id in jb1 jb3; do
+  # shellcheck disable=SC2016 # the backticks are literal text in the brief.
   grep -q 'You may start jcode subagents with your `swarm` tool' "$HM/data/$id/brief.md" || fail "$id must carry the subagent contract"
   grep -q 'at most 3 live at once' "$HM/data/$id/brief.md" || fail "$id must cap subagents at 3"
   grep -q 'Stop every subagent you started' "$HM/data/$id/brief.md" || fail "$id must require stopping subagents"

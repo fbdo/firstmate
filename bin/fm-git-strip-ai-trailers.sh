@@ -397,11 +397,13 @@ EOF
   done
   chmod 500 "$hooks_dir"
   if [ "$wtcfg" = 1 ]; then
-    git -C "$wt" config extensions.worktreeConfig true &&
-      git -C "$wt" config --worktree core.hooksPath "$hooks_dir" || {
+    if git -C "$wt" config extensions.worktreeConfig true &&
+      git -C "$wt" config --worktree core.hooksPath "$hooks_dir"; then
+      :
+    else
       echo "error: could not record core.hooksPath in the worktree config of $wt" >&2
       return 1
-    }
+    fi
   fi
 }
 
@@ -421,7 +423,7 @@ CMD=${1:-}
 case "$CMD" in
 install)
   shift
-  strip=1 guard= wtcfg=0
+  strip=1 guard='' wtcfg=0
   while [ "$#" -gt 2 ]; do
     case "$1" in
     --worktree-config)

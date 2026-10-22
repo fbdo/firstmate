@@ -96,7 +96,7 @@ keeper_beat_fresh() {
 
 prepare_run_dir() {
   if [ -L "$FM_JCODE_RUN" ]; then die "$FM_JCODE_RUN is a symlink; refusing"; fi
-  mkdir -p "$FM_JCODE_RUN" && chmod 700 "$FM_JCODE_RUN" || die "cannot create $FM_JCODE_RUN"
+  if ! { mkdir -p "$FM_JCODE_RUN" && chmod 700 "$FM_JCODE_RUN"; }; then die "cannot create $FM_JCODE_RUN"; fi
   mkdir -p "$JSTATE" || die "cannot create $JSTATE"
 }
 

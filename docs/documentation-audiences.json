@@ -409,6 +409,10 @@
       "audience": "operator-current"
     },
     {
+      "path": "docs/jcode-backend.md",
+      "audience": "operator-current"
+    },
+    {
       "path": "docs/jev-guards.md",
       "audience": "maintainer-architecture"
     },

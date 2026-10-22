@@ -272,7 +272,7 @@ hook_error() {  # <primary> <error>
   local primary=$1
   env -u FM_HOME -u FM_STATE_OVERRIDE JCODE_HOOK_EVENT=turn_end JCODE_HOOK_SESSION_ID=session_r \
     JCODE_HOOK_CWD="$TMP_ROOT/${primary##*/}-wt" JCODE_HOOK_STATUS=error JCODE_HOOK_ERROR="$2" \
-    PATH="$FAKEBIN:$PATH" QUOTA_FIXTURE="$TMP_ROOT/q.json" FM_TOKEN_HEADROOM_NOW=$NOW FM_TOKEN_HEADROOM=1 ${HOOK_SPAWN_ENV:-FM_TOKEN_RESUME_SPAWN=0} \
+    PATH="$FAKEBIN:$PATH" QUOTA_FIXTURE="$TMP_ROOT/q.json" FM_TOKEN_HEADROOM_NOW=$NOW FM_TOKEN_HEADROOM=1 FM_TOKEN_RESUME_SPAWN="${HOOK_SPAWN:-0}" FM_TOKEN_RESUME_POLL=1 \
     "$primary/bin/fm-jcode-hook.sh" </dev/null
 }
 
@@ -437,7 +437,7 @@ test_hook_starts_waiter() {
   chmod +x "$primary/bin/fm-send.sh"
   quota_json 50 50 > "$TMP_ROOT/q.json"
   # The reset is RESET5 (NOW+3600); the waiter's clock is already past it.
-  HOOK_SPAWN_ENV="FM_TOKEN_RESUME_SPAWN=1 FM_TOKEN_RESUME_POLL=1" hook_error "$primary" 'rate_limit_error' || fail "hook must exit 0"
+  HOOK_SPAWN=1 hook_error "$primary" 'rate_limit_error' || fail "hook must exit 0"
   for _ in $(seq 1 100); do [ -e "$primary/state/.token-resume.lock" ] && break; sleep 0.1; done
   [ -e "$primary/state/w1.ratelimit" ] || fail "hook did not record the rate limit"
   kill "$(cat "$primary/state/.token-resume.lock/pid" 2>/dev/null)" 2>/dev/null || true

@@ -165,7 +165,7 @@ note "step 4: the mate's own dispatcher denied a watcher run through its delegat
 # --- 5. marked request and correlated reply ------------------------------------------------
 "$H/bin/fm-send.sh" "$ID" "Please reply to this request: report the word PONG." > "$LAB/send.log" 2>&1 \
   || fail "fm-send to the mate failed: $(cat "$LAB/send.log")"
-CORR=$(ls "$H/state/pending-replies" 2>/dev/null | head -n 1)
+CORR=$(find "$H/state/pending-replies" -maxdepth 1 -mindepth 1 -exec basename {} \; 2>/dev/null | sort | head -n 1)
 [ -n "$CORR" ] || fail "no pending-reply record was created"
 reply_on_channel() { grep -q "corr=$CORR" "$H/state/$ID.status" 2>/dev/null; }
 wait_for "the correlated reply on the parent channel" reply_on_channel

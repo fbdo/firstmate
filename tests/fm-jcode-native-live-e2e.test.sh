@@ -113,6 +113,7 @@ out=$(run_fm fm-control.sh "$ID" interrupt) || fail "interrupt failed: $out"
 note "fm-control interrupt: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-120)"
 
 # Crash recovery: kill the keeper during a fresh turn, then ensure restarts it.
+# shellcheck disable=SC2016 # backticks are literal prompt text.
 printf 'Run `sleep 15` with your shell tool, then append "done [at=1]: recovered" to %s/%s.status.' "$STATE" "$ID" | api send "$SID" || fail "send failed"
 sleep 4
 kill "$(cat "$STATE/jcode/keeper.pid")" 2>/dev/null
@@ -130,6 +131,7 @@ api exists "$SID" || fail "the session must still be reachable after the bridge 
 note "bridge kill: ensure restored it"
 
 # One subagent in the worker's own worktree.
+# shellcheck disable=SC2016 # backticks are literal prompt text.
 printf 'Start exactly one subagent with your swarm tool whose task is to run `pwd` and report it. Wait for it with await_members, stop it, then append "working [at=1]: sub done" to %s/%s.status.' "$STATE" "$ID" | api send "$SID" || fail "send failed"
 for _ in $(seq 1 90); do [ -s "$STATE/$ID.jcode-children" ] && break; sleep 2; done
 if [ -s "$STATE/$ID.jcode-children" ]; then

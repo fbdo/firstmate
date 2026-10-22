@@ -3552,7 +3552,7 @@ test_inject_msg_jcode_api_delivers_reminder_doorbell() {
 }
 
 test_inject_msg_jcode_api_defers_and_refuses() {
-  local dir state calls
+  local dir state
   command -v node >/dev/null 2>&1 || { pass "inject_msg jcode-api defer: skipped (node unavailable)"; return; }
   dir=$(make_supercase inject-jcode-defer)
   state="$dir/state"
