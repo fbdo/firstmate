@@ -28,8 +28,7 @@ DPID=
 start_daemon() {
   node "$FAKE_API" serve "$DSOCK" "$DDIR" >/dev/null 2>&1 &
   DPID=$!
-  local i
-  for i in $(seq 1 100); do [ -S "$DSOCK" ] && return 0; sleep 0.05; done
+  for _ in $(seq 1 100); do [ -S "$DSOCK" ] && return 0; sleep 0.05; done
   fail "fake daemon did not start"
 }
 cleanup_all() {
