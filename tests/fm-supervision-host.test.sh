@@ -287,8 +287,10 @@ assert_no_re() {  # <regex> <file> <msg>
   ! grep -E -- "$1" "$2" >/dev/null || fail "$3"$'\n'"--- $2 ---"$'\n'"$(cat "$2" 2>/dev/null)"
 }
 
+# Every wait only bounds a failure, so the limit is scaled up to keep slow CI
+# runners from failing a wake that is merely late.
 wait_until() {  # <polls of 0.1s> <command...>
-  local limit=$1 i=0
+  local limit=$(($1 * 4)) i=0
   shift
   while [ "$i" -lt "$limit" ]; do
     "$@" && return 0
@@ -2082,7 +2084,7 @@ quiet_pass_through_successor() {  # <home>
 park_after_stop() {  # <home>
   rm -f "$1/host.rc"
   : > "$1/park.go"
-  wait_until 600 host_exited "$1" || fail "the watcher's downtime resurface did not reach main: $(cat "$1/host.out")"
+  wait_until 150 host_exited "$1" || fail "the watcher's downtime resurface did not reach main: $(cat "$1/host.out")"
   assert_re '^check: rearm-resurface' "$1/host.out" "fixture: the first close after the watcher stopped was not its resurface"
   main_drain_and_ack "$1"
   quiet_pass_through_successor "$1"
