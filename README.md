@@ -78,7 +78,7 @@ Codex and OpenCode are also verified and supported as primary harnesses; Codex u
 Cursor Agent CLI is verified as a primary too, using a tracked project-scope `.cursor/hooks.json` whose `stop` hook parks on the watcher between turns, closest in shape to Claude Code's.
 Launch it with `--trust`, or none of its project hooks load; it also has no turn-end hook in headless `cursor-agent -p`, so run the primary session interactively.
 
-jcode runs as a primary, crewmate, and scout, but not as a secondmate: its sessions share one background daemon, so Firstmate anchors the session lock on the live jcode TUI client and arms the watcher as a jcode background task.
+jcode runs as a primary, crewmate, scout, and local secondmate (see [docs/jcode-backend.md](docs/jcode-backend.md)): its sessions share one background daemon, so Firstmate anchors the session lock on the live jcode TUI client and arms the watcher as a jcode background task.
 jcode reads hooks from the machine-wide `~/.jcode/config.toml`, so register this home's hook dispatcher once with `bin/fm-jcode-setup.sh install` (or `bin/fm-jcode-setup.sh print` to add the lines yourself), then run `jcode` interactively inside the checkout; rerun `install` after an update adds a hook, and `bin/fm-jcode-setup.sh status` reports a missing one.
 The dispatcher ignores every jcode session that is neither this home's primary nor one of its jcode workers.
 
