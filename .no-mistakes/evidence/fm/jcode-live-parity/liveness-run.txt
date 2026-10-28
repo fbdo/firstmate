@@ -1,0 +1,20 @@
+# claude 2.1.311 (Claude Code): title='claude' foreground=[claude ]
+ok - harness liveness: claude 2.1.311 (Claude Code) classifies alive
+# claude 2.1.311 (Claude Code): ancestry verdicts=[comm claude]
+ok - harness detection: claude 2.1.311 (Claude Code) is identified by the ancestry walk at comm strength
+# skip: codex is not installed on this machine, so its classification is unverified here
+# skip: opencode is not installed on this machine, so its classification is unverified here
+# skip: pi is not installed on this machine, so its classification is unverified here
+# skip: pi-signed is not installed on this machine, so its classification is unverified here
+# skip: grok is not installed on this machine, so its classification is unverified here
+# skip: kimi is not installed on this machine, so its classification is unverified here
+# skip: cursor is not installed on this machine, so its classification is unverified here
+# skip: muse is not installed on this machine, so its classification is unverified here
+# jcode v0.99.1 (7206efd0c): title='jcode' foreground=[jcode ]
+ok - harness liveness: jcode v0.99.1 (7206efd0c) classifies alive
+# jcode v0.99.1 (7206efd0c): ancestry verdicts=[comm jcode]
+ok - harness detection: jcode v0.99.1 (7206efd0c) is identified by the ancestry walk at comm strength
+ok - harness detection: jcode v0.99.1 (7206efd0c) daemon tool subprocess is identified by the ancestry walk at comm strength
+ok - harness liveness: jcode v0.99.1 (7206efd0c) native backend probe classifies alive
+# unverified on this machine (not installed): codex opencode pi pi-signed grok kimi cursor muse
+# checked 2 installed harness(es)
