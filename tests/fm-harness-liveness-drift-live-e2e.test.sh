@@ -24,6 +24,15 @@
 # unauthenticated harness still starts its process, which is all the liveness
 # probe reads.
 #
+# jcode is the one harness this guard cannot launch bare in the loop below: a
+# bare `jcode` would attach to (or start) the captain's shared daemon. It runs
+# in its own section against a PRIVATE daemon (own JCODE_HOME, runtime dir and
+# socket, as tests/fm-afk-jcode-live-e2e.test.sh does) and covers the surfaces
+# firstmate really uses: the TUI client in a tmux pane (the pane path
+# bin/fm-spawn.sh launches), a tool subprocess of the daemon (where a native
+# backend worker's own detection runs), and the native backend's own liveness
+# probe (bin/backends/jcode.sh). No prompt is ever submitted.
+#
 # Portable serial CI installs the public Pi package but no credentials, so this
 # guard checks that available token-free surface there and runs against every installed
 # harness on more capable hosts. The portable counterpart in
@@ -47,7 +56,33 @@ SOCKET="fm-liveness-drift-$$"
 LAB=$(mktemp -d "${TMPDIR:-/tmp}/fm-liveness-drift.XXXXXX")
 SESSION=drift
 
+JH="$LAB/jhome"
+JCODE_PRIVATE=0
+
+# Every process of the private jcode daemon, found by its JCODE_HOME so the
+# captain's shared daemon can never match.
+private_daemon_pids() {
+  local d
+  [ "$JCODE_PRIVATE" = 1 ] || return 0
+  for d in /proc/[0-9]*; do
+    [ "$(cat "$d/comm" 2>/dev/null)" = jcode ] || continue
+    [ -r "$d/environ" ] || continue
+    tr '\0' '\n' < "$d/environ" 2>/dev/null | grep -qxF "JCODE_HOME=$JH" && printf '%s\n' "${d#/proc/}"
+  done
+  return 0
+}
+
+stop_private_jcode() {
+  local pid
+  [ "$JCODE_PRIVATE" = 1 ] || return 0
+  FM_HOME="$LAB/fmhome" "$ROOT/bin/fm-jcode-keeper.sh" stop >/dev/null 2>&1 || true
+  for pid in $(private_daemon_pids); do kill "$pid" 2>/dev/null; done
+  sleep 1
+  return 0
+}
+
 cleanup_all() {
+  stop_private_jcode
   "$REAL_TMUX" -L "$SOCKET" kill-server >/dev/null 2>&1 || true
   [ -n "${LAB:-}" ] && rm -rf "$LAB"
 }
@@ -99,6 +134,85 @@ resolve_harness_binary() {  # <harness>
   return 1
 }
 
+# --- jcode: private daemon, native backend, daemon tool subprocess -----------
+#
+# Everything here is token-free: a session is created and resumed, no prompt is
+# submitted, and the daemon's own debug `tool:bash` runs a shell command with no
+# model call. The captain's shared daemon, ~/.jcode and config.toml are never
+# touched: the daemon gets its own JCODE_HOME, runtime dir and socket.
+JENV=()
+JCODE_SID=
+JCODE_SETUP_ERROR=
+
+start_private_jcode() {
+  mkdir -p "$JH/run" "$LAB/fmhome/state" "$LAB/fmhome/config"
+  JENV=("JCODE_HOME=$JH" "JCODE_RUNTIME_DIR=$JH/run" "JCODE_SOCKET=$JH/run/jcode.sock" "JCODE_DEBUG_CONTROL=1" "JCODE_NO_AUTO_UPDATE=1")
+  JCODE_PRIVATE=1
+  env -u JCODE_SESSION_ID "${JENV[@]}" nohup jcode --quiet --no-update serve --socket "$JH/run/jcode.sock" \
+    >"$LAB/jcode-serve.log" 2>&1 &
+  local _
+  for _ in $(seq 1 80); do [ -S "$JH/run/jcode.sock" ] && break; sleep 0.25; done
+  if [ ! -S "$JH/run/jcode.sock" ]; then
+    JCODE_SETUP_ERROR="daemon socket never appeared: $(tail -n 3 "$LAB/jcode-serve.log" 2>/dev/null | tr '\n' ' ')"
+    return 1
+  fi
+  command -v node >/dev/null 2>&1 || { JCODE_SETUP_ERROR="node is required for the jcode API bridge"; return 1; }
+  JCODE_SID=$(env -u JCODE_SESSION_ID "${JENV[@]}" FM_JCODE_API_ALLOW_DEFAULT_MODEL=1 \
+    node "$ROOT/bin/fm-jcode-api.mjs" create "$LAB/wt" --note "liveness drift guard") \
+    || { JCODE_SETUP_ERROR="session create failed"; return 1; }
+  [ -n "$JCODE_SID" ] || { JCODE_SETUP_ERROR="session create printed no id"; return 1; }
+  return 0
+}
+
+# The two jcode surfaces the tmux loop above cannot see.
+jcode_native_checks() {  # <version>
+  local version=$1 out verdict descent state meta fmh
+  local -a keeper_env
+
+  # (1) Detection from where a native-backend worker's own tools run: a tool
+  # subprocess that is a CHILD OF THE DAEMON, with no pane and no TUI client.
+  # The daemon runs the command through its own debug `tool:bash` (no model).
+  out="$LAB/daemon-tool.out"
+  : > "$out"
+  env -u JCODE_SESSION_ID "${JENV[@]}" jcode debug --session "$JCODE_SID" \
+    "tool:bash {\"command\":\"'$ROOT/bin/fm-harness.sh' ancestry \$\$ > '$out'; '$ROOT/bin/fm-harness.sh' ancestry-descent \$\$ >> '$out'\"}" \
+    >"$LAB/daemon-tool.reply" 2>&1 || true
+  verdict=$(sed -n 1p "$out")
+  descent=$(sed -n '2,$p' "$out" | tr '\n' ';')
+  [ "$verdict" = "comm jcode" ] || fail \
+    "DETECTION DRIFT: jcode $version daemon tool subprocess resolves '${verdict:-nothing}' through the ancestry walk, not 'comm jcode'. A native-backend worker's tools run as children of the shared daemon, so firstmate cannot identify those sessions. Observed descent verdicts [$descent]; tool reply: $(tr '\n' ' ' < "$LAB/daemon-tool.reply" | cut -c1-300). Teach bin/fm-harness.sh's harness_ancestry the name this release reports."
+  pass "harness detection: jcode $version daemon tool subprocess is identified by the ancestry walk at comm strength"
+
+  # (2) Liveness through the native backend's own probe, not the tmux one: a
+  # real keeper and bridge for a scratch home that records this session.
+  fmh="$LAB/fmhome"
+  meta="$fmh/state/jdrift.meta"
+  {
+    printf 'backend=jcode\nendpoint_task_id=jdrift\nwindow=jcode:%s\njcode_session=%s\nworktree=%s\nproject=%s\n' \
+      "$JCODE_SID" "$JCODE_SID" "$LAB/wt" "$LAB/wt"
+    printf 'jcode_home=%s\njcode_runtime_dir=%s\njcode_socket=%s\n' "$JH" "$JH/run" "$JH/run/jcode.sock"
+  } >"$meta"
+  # The bridge socket is derived from the scratch FM_HOME; read it back from the
+  # keeper's own env verb so the record names the socket the probe will use.
+  keeper_env=(env -u JCODE_SESSION_ID "${JENV[@]}" "FM_HOME=$fmh")
+  eval "$("${keeper_env[@]}" "$ROOT/bin/fm-jcode-keeper.sh" env)"
+  printf 'jcode_api_socket=%s\n' "$JCODE_API_SOCKET" >>"$meta"
+  printf 'session=%s\ngen=1\nworktree=%s\n' "$JCODE_SID" "$LAB/wt" >"$fmh/state/jdrift.jcode-session"
+  "${keeper_env[@]}" "$ROOT/bin/fm-jcode-keeper.sh" ensure >"$LAB/keeper-ensure.out" 2>&1 || fail \
+    "LIVENESS DRIFT: jcode $version: the keeper and bridge for the native backend did not come up against the private daemon: $(tr '\n' ' ' < "$LAB/keeper-ensure.out")"
+  state=
+  for _ in $(seq 1 100); do
+    # shellcheck disable=SC2016  # the single-quoted script expands in the child shell
+    state=$(env "${JENV[@]}" "FM_HOME=$fmh" FM_STATE_OVERRIDE="$fmh/state" bash -c \
+      '. "$1/bin/fm-backend.sh"; fm_backend_source jcode && fm_backend_agent_state jcode "jcode:$2"' _ "$ROOT" "$JCODE_SID")
+    [ "$state" = alive ] && break
+    sleep 0.2
+  done
+  [ "$state" = alive ] || fail \
+    "LIVENESS DRIFT: jcode $version is running on its daemon but the native backend probe classifies '$state', not 'alive'. Supervision and lifecycle control treat this worker as unattributable. Check the daemon session listing (list_sessions) and the keeper heartbeat in $fmh/state/jcode."
+  pass "harness liveness: jcode $version native backend probe classifies alive"
+}
+
 CHECKED=0
 SKIPPED=
 
@@ -111,7 +225,7 @@ SKIPPED=
 # cursor matters for the same reason muse does, from the other direction: it
 # runs as a bundled node script, so its pane title is a bare `node` that no name
 # pattern can own, and identity has to come from its install path or argv[0].
-for harness in claude codex opencode pi pi-signed grok kimi cursor muse; do
+for harness in claude codex opencode pi pi-signed grok kimi cursor muse jcode; do
   if ! bin_path=$(resolve_harness_binary "$harness"); then
     SKIPPED="$SKIPPED $harness"
     note "skip: $harness is not installed on this machine, so its classification is unverified here"
@@ -120,6 +234,8 @@ for harness in claude codex opencode pi pi-signed grok kimi cursor muse; do
 
   version=$("$bin_path" --version 2>/dev/null | head -1 | tr -d '\r') || version=
   [ -n "$version" ] || version="unknown"
+  # jcode already prints its own name ("jcode v0.99.1 (...)"); keep pass lines readable.
+  [ "$harness" != jcode ] || version=${version#jcode }
 
   target="$SESSION:$harness"
   # cursor blocks on a workspace-trust prompt in a directory it has never seen,
@@ -127,8 +243,20 @@ for harness in claude codex opencode pi pi-signed grok kimi cursor muse; do
   # same flag fm-spawn passes for the same reason.
   launch_args=""
   [ "$harness" = cursor ] && launch_args="--trust"
+  launch_prefix=
+  if [ "$harness" = jcode ]; then
+    # The pane runs exactly what bin/fm-spawn.sh launches for a jcode worker:
+    # a TUI client resumed onto a daemon session, never a bare `jcode`. The
+    # session lives on the PRIVATE daemon started below.
+    if ! start_private_jcode; then
+      fail "jcode ($version): could not start the private daemon or create its session: $JCODE_SETUP_ERROR"
+    fi
+    launch_prefix='env'
+    launch_args="--resume $JCODE_SID --no-update --no-selfdev"
+  fi
   # shellcheck disable=SC2086  # deliberate: an empty value must add no argument
-  "$REAL_TMUX" -L "$SOCKET" new-window -d -t "$SESSION:" -n "$harness" -c "$LAB/wt" -- "$bin_path" $launch_args \
+  "$REAL_TMUX" -L "$SOCKET" new-window -d -t "$SESSION:" -n "$harness" -c "$LAB/wt" -- \
+    ${launch_prefix:+$launch_prefix} ${launch_prefix:+"${JENV[@]}"} "$bin_path" $launch_args \
     || fail "$harness ($version): could not launch a window for the liveness probe"
 
   state=
@@ -223,6 +351,7 @@ EOF
 
   note "$harness $version: ancestry verdicts=[$(printf '%s' "$verdicts" | tr '\n' ';')]"
   pass "harness detection: $harness $version is identified by the ancestry walk at comm strength"
+  [ "$harness" != jcode ] || jcode_native_checks "$version"
   CHECKED=$((CHECKED + 1))
 done
 

@@ -111,12 +111,24 @@ Codex ships as a `node` npm shim that spawns its native `codex` binary as a fore
 That difference is the reason the guard cannot probe the pane process alone.
 The guarantee this guard holds is a strength claim, not only an identity one, because `detect_own` hands an args-strength verdict straight back to a retained foreign marker.
 A pane-only probe would have observed `args codex`, passed, and gone on passing if a later release stopped spawning the native child, while real sessions silently regressed to the original bug.
+
 Probing from below asks the question from the vantage a tool subprocess actually occupies, so the guard can require comm strength somewhere in the session and require every comm-strength vantage to name the same harness.
 The vantage set stops at the upward path rather than the whole subtree, because `harness_ancestry` only ever climbs and a sibling branch is therefore a vantage firstmate's own detection can never occupy.
 The reject-other-harness cross-check judges comm-strength vantages only, because an args-strength verdict is path-ambiguous by construction: a harness-spawned MCP server running as `node <home>/.claude/mcp/<server>.js` answers `args claude` purely from the `.claude` path component, and such a server is normally a child of the agent binary, so it can be the deepest descendant and sit on this path.
 That narrowing changes only which vantages the cross-check judges; the comm-strength requirement itself is unchanged.
 A single-process harness has no descendant that adds a distinct verdict, which is why `claude` reports one.
 The portable regression pins every half without any harness installed: `tests/fm-harness-precedence.test.sh` asserts that this two-process topology decides at comm strength, that the descent probe reaches a strength the top-of-session probe cannot, that a sibling branch answering a foreign harness contributes no verdict, that a foreign args-only verdict at the deepest vantage leaves the comm-strength identity intact, and that equal-depth ties choose the comm-strength leaf regardless of process ordering.
+
+jcode is covered by the same guard on a private daemon, never the shared one, and spends no model tokens.
+It checks three surfaces: the `jcode --resume` TUI client in a tmux pane under the tmux liveness probe and the ancestry walk, a tool subprocess of the daemon under the ancestry walk, and the native backend's own liveness probe (`fm_backend_agent_state jcode`).
+Observed on 2026-10-28 on Linux arm64:
+
+```text
+ok - harness liveness: jcode v0.99.1 (7206efd0c) classifies alive
+ok - harness detection: jcode v0.99.1 (7206efd0c) is identified by the ancestry walk at comm strength
+ok - harness detection: jcode v0.99.1 (7206efd0c) daemon tool subprocess is identified by the ancestry walk at comm strength
+ok - harness liveness: jcode v0.99.1 (7206efd0c) native backend probe classifies alive
+```
 The run did not reach `opencode`, `pi`, `pi-signed`, `grok`, `kimi`, or `muse`, which were not installed, and stopped at the same pre-existing liveness failure for `cursor` 3.18.9, whose resolved binary on that machine is the editor rather than `cursor-agent`; those adapters are unverified by this run.
 
 ## tmux
